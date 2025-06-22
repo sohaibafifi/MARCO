@@ -49,7 +49,6 @@ Requirements:
 
  - Python 3.9+
  - A standard build environment (make, gcc or clang, etc.)
- - zlib development libraries (e.g., `zlib1g-dev` or `zlib-devel` packages)
 
 To build and test the Python bindings:
 
