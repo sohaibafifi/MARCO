@@ -1,3 +1,7 @@
+3.2   - 2025-06-22
+------------------
+ * Remove unneeded dependency on zlib; simplifies building.
+
 3.1   - 2025-06-08
 ------------------
  * Performance: Update pyminisolvers; use new_vars() method in MARCO when
