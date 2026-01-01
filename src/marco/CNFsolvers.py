@@ -226,13 +226,14 @@ class MUSerSubsetSolver(MinisatSubsetSolver):
     # override shrink method to use MUSer2
     # NOTE: seed must be indexed (i.e., not a set)
     def shrink(self, seed):
-        hard = [x for x in self._msolver.implies() if x > 0]
         # In parallel mode, this seed may be explored by the time
         # we get here.  If it is, the hard constraints may include
         # constraints *outside* of the current seed, which would invalidate
         # the returned MUS.  If the seed is explored, give up on this seed.
         if not self._msolver.check_seed(seed):
             return None
+
+        hard = set(x for x in self._msolver.implies() if x > 0)
 
         # MUSer doesn't like a formula with only hard constraints,
         # and it's a waste of time to call MUSer at all on it anyway.
@@ -248,7 +249,7 @@ class MUSerSubsetSolver(MinisatSubsetSolver):
             # Run MUSer
             self._proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             out, err = self._proc.communicate()
-            self._proc = None  # clear it when we're done (so cleanup won't try to kill it)
+            del self._proc  # clear it when we're done (so cleanup won't try to kill it)
 
             out = out.decode()
 
