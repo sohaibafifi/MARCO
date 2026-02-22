@@ -1,6 +1,7 @@
 import os
 import queue
 import threading
+from collections import deque
 
 
 class MarcoPolo(object):
@@ -14,11 +15,88 @@ class MarcoPolo(object):
         self.n = self.map.n   # number of constraints
         self.got_top = False  # track whether we've explored the complete set (top of the lattice)
 
+        # Adaptive mode toggles MUS/MCS bias online based on recent output ratio.
+        self.adaptive = bool(self.config.get('adaptive', False))
+        self.adaptive_window = max(1, int(self.config.get('adaptive_window', 32)))
+        self.adaptive_min_outputs = max(1, int(self.config.get('adaptive_min_outputs', 16)))
+        self.adaptive_target_mus_ratio = float(self.config.get('adaptive_target_mus_ratio', 0.50))
+        self.adaptive_hysteresis = max(0.0, float(self.config.get('adaptive_hysteresis', 0.15)))
+        self._recent_outputs = deque(maxlen=self.adaptive_window)
+
+        # Dual-side feedback: learn map clauses from intermediate SAT/UNSAT seeds.
+        self.feedback_enabled = bool(self.config.get('feedback_enabled', False))
+        self.feedback_sat_clause_max = int(self.config.get('feedback_sat_clause_max', 12))
+        self.feedback_unsat_clause_max = int(self.config.get('feedback_unsat_clause_max', 12))
+        self.feedback_max_clauses = int(self.config.get('feedback_max_clauses', 2000))
+        self.feedback_clause_count = 0
+        self._feedback_sat_sets = set()
+        self._feedback_unsat_sets = set()
+
         self.pipe = pipe
         # if a pipe is provided, use it to receive results from other enumerators
         if self.pipe:
             self.recv_thread = threading.Thread(target=self.receive_thread)
             self.recv_thread.start()
+
+    def _feedback_budget_exhausted(self):
+        if not self.feedback_enabled:
+            return True
+        if self.feedback_max_clauses <= 0:
+            return False
+        return self.feedback_clause_count >= self.feedback_max_clauses
+
+    def _learn_feedback(self, seed_is_sat, seed, known_max):
+        # Learn from intermediate seeds only (if already known maximal/minimal, this is redundant).
+        if known_max or self._feedback_budget_exhausted():
+            return
+
+        seedset = frozenset(seed)
+        if seed_is_sat:
+            clause_len = self.n - len(seed)
+            if self.feedback_sat_clause_max >= 0 and clause_len > self.feedback_sat_clause_max:
+                return
+            if seedset in self._feedback_sat_sets:
+                return
+            self.map.block_down(seed)
+            self._feedback_sat_sets.add(seedset)
+            self.feedback_clause_count += 1
+            self.stats.increment_counter("feedback.sat")
+        else:
+            clause_len = len(seed)
+            if self.feedback_unsat_clause_max >= 0 and clause_len > self.feedback_unsat_clause_max:
+                return
+            if seedset in self._feedback_unsat_sets:
+                return
+            self.map.block_up(seed)
+            self._feedback_unsat_sets.add(seedset)
+            self.feedback_clause_count += 1
+            self.stats.increment_counter("feedback.unsat")
+
+    def _set_bias(self, mus_bias):
+        if self.bias_high == mus_bias:
+            return
+        self.bias_high = mus_bias
+        self.config['bias'] = 'MUSes' if mus_bias else 'MCSes'
+        self.stats.increment_counter("adaptive.switch.%s" % ("MUS" if mus_bias else "MCS"))
+
+    def _record_result(self, result_type):
+        if not self.adaptive:
+            return
+        self._recent_outputs.append(result_type)
+        if len(self._recent_outputs) < self.adaptive_min_outputs:
+            return
+
+        mus_ratio = float(sum(1 for x in self._recent_outputs if x == 'U')) / len(self._recent_outputs)
+        self.stats.add_stat("adaptive.window_mus_ratio", mus_ratio)
+
+        low = max(0.0, self.adaptive_target_mus_ratio - self.adaptive_hysteresis)
+        high = min(1.0, self.adaptive_target_mus_ratio + self.adaptive_hysteresis)
+        if mus_ratio < low:
+            # Too few MUS outputs recently: prioritize MUS-hunting.
+            self._set_bias(True)
+        elif mus_ratio > high:
+            # Plenty of MUS outputs: diversify toward MCS-hunting.
+            self._set_bias(False)
 
     def receive_thread(self):
         while self.pipe.poll(None):
@@ -64,6 +142,7 @@ class MarcoPolo(object):
                 seed_is_sat, seed = self.subs.check_subset(seed, improve_seed=True)
                 self.record_delta('checkA', oldlen, len(seed), seed_is_sat)
                 known_max = (known_max and (seed_is_sat == self.bias_high))
+                self._learn_feedback(seed_is_sat, seed, known_max)
 
             if self.config['verbose']:
                 print("- Seed is %s." % {True: "SAT", False: "UNSAT"}[seed_is_sat])
@@ -94,6 +173,7 @@ class MarcoPolo(object):
                         pass
 
                     self.map.block_down(MSS)
+                    self._record_result(res[0])
 
                 if self.config['verbose']:
                     print("- MSS blocked.")
@@ -129,6 +209,7 @@ class MarcoPolo(object):
                         pass
 
                     self.map.block_up(MUS)
+                    self._record_result(res[0])
 
                 if self.config['verbose']:
                     print("- MUS blocked.")

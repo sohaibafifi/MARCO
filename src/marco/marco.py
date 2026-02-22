@@ -7,6 +7,7 @@ import select
 import signal
 import sys
 import threading
+import traceback
 
 from . import utils
 from . import mapsolvers
@@ -57,8 +58,7 @@ def parse_args(args_list=None):
 
     # Required arguments
     required_args = parser.add_mutually_exclusive_group(required=True)
-    # we don't use the file object, but using that type verifies that it exists as a file
-    required_args.add_argument('inputfile', nargs='?', type=argparse.FileType('rb'),
+    required_args.add_argument('inputfile', nargs='?', type=str,
                                help="name of file to process")
     required_args.add_argument('--check-muser', action='store_true',
                                help="just run a check of the MUSer2 helper application and exit (used to configure tests).")
@@ -110,6 +110,26 @@ def parse_args(args_list=None):
                            help="perform no model maximization whatsoever (applies either shrink() or grow() to all seeds)")
     exp_group.add_argument('--all-randomized', action='store_true',
                            help="randomly initialize *all* children in parallel mode (default: first thread is *not* randomly initialized, all others are).")
+    exp_group.add_argument('--muser-bin', type=str, default=None,
+                           help="path to MUSer2 binary for CNF/GCNF shrink (overrides bundled Linux binary; can also set MUSER2_PATH).")
+    exp_group.add_argument('--adaptive', action='store_true',
+                           help="enable adaptive MARCO mode (dynamic MUS/MCS bias + dual-side map feedback).")
+    exp_group.add_argument('--adaptive-window', type=int, default=32,
+                           help="window size for adaptive MUS/MCS bias updates (default: 32).")
+    exp_group.add_argument('--adaptive-min-outputs', type=int, default=16,
+                           help="minimum outputs before adaptive switching starts (default: 16).")
+    exp_group.add_argument('--adaptive-target-mus-ratio', type=float, default=0.50,
+                           help="target MUS ratio in adaptive mode (default: 0.50).")
+    exp_group.add_argument('--adaptive-hysteresis', type=float, default=0.15,
+                           help="hysteresis around target MUS ratio (default: 0.15).")
+    exp_group.add_argument('--feedback-disable', action='store_true',
+                           help="disable dual-side feedback clause learning (adaptive mode enables it by default).")
+    exp_group.add_argument('--feedback-sat-clause-max', type=int, default=12,
+                           help="max clause length for SAT feedback block_down clauses (default: 12; <0 disables limit).")
+    exp_group.add_argument('--feedback-unsat-clause-max', type=int, default=12,
+                           help="max clause length for UNSAT feedback block_up clauses (default: 12; <0 disables limit).")
+    exp_group.add_argument('--feedback-max-clauses', type=int, default=2000,
+                           help="max number of learned feedback clauses (default: 2000; <=0 is unbounded).")
     comms_group = exp_group.add_mutually_exclusive_group()
     comms_group.add_argument('--comms-disable', action='store_true',
                              help="disable the communications between children (i.e., when the master receives a result from a child, it won't send to other children).")
@@ -118,11 +138,6 @@ def parse_args(args_list=None):
 
     # parse args_list and return resulting arguments
     args = parser.parse_args(args_list)
-    # we can't use the file object directly because it can't be shared with child processes,
-    # so close it immediately
-    if args.inputfile:
-        args.inputfile.close()
-
     if args.parallel is None:
         args.parallel = default_parallel_config(args.threads, args.bias)
 
@@ -132,18 +147,32 @@ def parse_args(args_list=None):
 def check_args(args):
     if args.check_muser:
         try:
-            muser_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'muser2-para')
+            muser_path = args.muser_bin or os.environ.get('MUSER2_PATH')
+            if not muser_path:
+                muser_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'muser2-para')
             utils.check_executable("MUSer2", muser_path)
         except utils.ExecutableException as e:
             print(str(e))
             sys.exit(1)
         sys.exit(0)
 
-    if not (args.smt or args.cnf or args.inputfile.name.endswith(('.cnf', '.cnf.gz', '.gcnf', '.gcnf.gz', '.smt2'))):
+    if args.inputfile and not os.path.isfile(args.inputfile):
+        error_exit("Input file not found: %s" % args.inputfile)
+
+    if not (args.smt or args.cnf or args.inputfile.endswith(('.cnf', '.cnf.gz', '.gcnf', '.gcnf.gz', '.smt2'))):
         error_exit(
-            "Cannot determine filetype (cnf or smt) of input: %s" % args.inputfile.name,
+            "Cannot determine filetype (cnf or smt) of input: %s" % args.inputfile,
             "Please provide --cnf or --smt option, or --help to see all options."
         )
+
+    if args.adaptive_window < 1:
+        error_exit("Invalid adaptive option.", "--adaptive-window must be >= 1.")
+    if args.adaptive_min_outputs < 1:
+        error_exit("Invalid adaptive option.", "--adaptive-min-outputs must be >= 1.")
+    if args.adaptive_target_mus_ratio < 0.0 or args.adaptive_target_mus_ratio > 1.0:
+        error_exit("Invalid adaptive option.", "--adaptive-target-mus-ratio must be in [0,1].")
+    if args.adaptive_hysteresis < 0.0:
+        error_exit("Invalid adaptive option.", "--adaptive-hysteresis must be >= 0.")
 
 
 def at_exit(stats):
@@ -257,7 +286,7 @@ def setup_parallel(args, stats):
 
 
 def setup_csolver(args, seed, n_only=False):
-    filename = args.inputfile.name
+    filename = args.inputfile
 
     # create appropriate constraint solver
     if args.cnf or filename.endswith(('.cnf', '.cnf.gz', '.gcnf', '.gcnf.gz')):
@@ -272,6 +301,8 @@ def setup_csolver(args, seed, n_only=False):
             extra_args = {}
             if args.mcs_only:
                 extra_args['store_dimacs'] = True
+            if args.muser_bin:
+                extra_args['muser_path'] = args.muser_bin
             csolver = solverclass(filename, seed, n_only, **extra_args)
         except utils.ExecutableException as e:
             error_exit("Unable to use MUSer2 for MUS extraction.", "Use --force-minisat to use Minisat instead (NOTE: it will be much slower.)", e)
@@ -331,6 +362,15 @@ def get_config(args):
     else:
         config['maximize'] = True
     config['verbose'] = args.verbose > 1
+    config['adaptive'] = args.adaptive
+    config['adaptive_window'] = args.adaptive_window
+    config['adaptive_min_outputs'] = args.adaptive_min_outputs
+    config['adaptive_target_mus_ratio'] = args.adaptive_target_mus_ratio
+    config['adaptive_hysteresis'] = args.adaptive_hysteresis
+    config['feedback_enabled'] = (args.adaptive and not args.feedback_disable)
+    config['feedback_sat_clause_max'] = args.feedback_sat_clause_max
+    config['feedback_unsat_clause_max'] = args.feedback_unsat_clause_max
+    config['feedback_max_clauses'] = args.feedback_max_clauses
 
     return config
 
@@ -353,8 +393,20 @@ def run_enumerator(stats, args, pipe, seed=None):
     # enumerate results in a separate thread so signal handling works while in C code
     # ref: https://thisismiller.github.io/blog/CPython-Signal-Handling/
     def enumerate():
-        for result in enumerator.enumerate():
-            pipe.send(result)
+        try:
+            for result in enumerator.enumerate():
+                try:
+                    pipe.send(result)
+                except (BrokenPipeError, EOFError, OSError):
+                    # Master is shutting down; stop quietly.
+                    return
+        except (BrokenPipeError, EOFError, OSError):
+            return
+        except Exception:
+            # Avoid noisy thread exceptions during process teardown.
+            if args.verbose > 1:
+                traceback.print_exc()
+            return
 
     enumthread = threading.Thread(target=enumerate)
     enumthread.daemon = True  # required so signal handler exit will end enumeration thread

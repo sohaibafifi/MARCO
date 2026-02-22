@@ -179,12 +179,16 @@ class MinisatSubsetSolver(object):
 
 
 class MUSerSubsetSolver(MinisatSubsetSolver):
-    def __init__(self, filename, rand_seed=None, n_only=False):
+    def __init__(self, filename, rand_seed=None, n_only=False, muser_path=None):
         MinisatSubsetSolver.__init__(self, filename, rand_seed, n_only, store_dimacs=True)
         self.core_pattern = re.compile(r'^v [\d ]+$', re.MULTILINE)
 
-        binary = 'muser2-para'
-        self.muser_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), binary)
+        if muser_path is None:
+            muser_path = os.environ.get('MUSER2_PATH')
+        if muser_path is None:
+            binary = 'muser2-para'
+            muser_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), binary)
+        self.muser_path = muser_path
         utils.check_executable("MUSer2", self.muser_path)
 
         self._proc = None  # track the MUSer process

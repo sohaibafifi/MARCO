@@ -74,12 +74,20 @@ Additionally, the following are recommended, depending on your needs:
    fall-back mode that uses a basic, *much less efficient* deletion-based MUS
    extractor using Minisat directly (see the `--force-minisat` option).
 
+   You can point MARCO to a platform-specific MUSer2 binary with either:
+   - `--muser-bin /path/to/muser2-para`
+   - `MUSER2_PATH=/path/to/muser2-para`
+
 
 ## Usage
 
 Example: `./marco.py tests/test1.cnf`
+Adaptive variant example: `./marco_adaptive.py tests/test1.cnf`
+Adaptive variant with custom MUSer2 binary:
+`./marco_adaptive.py --muser-bin /path/to/muser2-para tests/test1.cnf`
 
 Run `./marco.py --help` for a list of available options.
+Adaptive options are also available directly from `./marco.py` via `--adaptive`.
 
 Input files may be in CNF, GCNF (group oriented CNF), or SMT2 format.  Input
 files may be gzipped.
