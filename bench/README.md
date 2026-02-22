@@ -6,6 +6,13 @@ Runner:
 
 - `bench/bench_marco_sat11.py`
 
+Available benchmark methods:
+
+- `marco`: paper default MARCO (`marco.py` default settings)
+- `marco_basic`: MARCO without maximization (`marco.py --nomax`)
+- `marco_plus`: MARCO+ style (`marco.py --improved-implies`)
+- `marco_adaptive`: adaptive variant (`marco_adaptive.py`)
+
 ## Quick Local Check
 
 ```bash
@@ -14,7 +21,8 @@ cd /path/to/MARCO
 uv run python bench/bench_marco_sat11.py \
   --dataset-root /path/to/SAT11-Competition-MUS-SelectedBenchmarks \
   --marco-root "$PWD" \
-  --methods marco,marco_adaptive \
+  --methods marco_basic,marco_plus \
+  --baseline marco_basic \
   --max-files 1 \
   --repeats 1 \
   --warmup 0 \
@@ -40,7 +48,7 @@ python3 bench/build_manifest.py \
 ```bash
 python3 bench/build_array_params.py \
   --manifest bench/sat11_manifest.tsv \
-  --methods marco,marco_adaptive \
+  --methods marco_basic,marco_plus \
   --repeats 1 \
   --threads 1 \
   --output bench/array_params.tsv

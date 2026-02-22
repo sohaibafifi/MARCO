@@ -4,6 +4,8 @@ Benchmark paper MARCO implementations on SAT11 CNF instances (.cnf.bz2).
 
 Compares:
 - MARCO baseline from MARCO `marco.py`
+- MARCO basic variant (`marco.py --nomax`)
+- MARCO+ style variant (`marco.py --improved-implies`)
 - Adaptive variant from MARCO `marco_adaptive.py`
 
 The output schema mirrors bench_marco_sat11.py to reuse the same workflow.
@@ -250,7 +252,21 @@ def run_once(
     del validate
     del verify_unsat
 
-    script_name = "marco.py" if method_name == "marco" else "marco_adaptive.py"
+    if method_name == "marco":
+        script_name = "marco.py"
+        method_flags: List[str] = []
+    elif method_name == "marco_basic":
+        script_name = "marco.py"
+        method_flags = ["--nomax"]
+    elif method_name == "marco_plus":
+        script_name = "marco.py"
+        method_flags = ["--improved-implies"]
+    elif method_name == "marco_adaptive":
+        script_name = "marco_adaptive.py"
+        method_flags = []
+    else:
+        raise ValueError(f"Unknown method: {method_name}")
+
     script_path = marco_root / script_name
 
     t0 = time.perf_counter()
@@ -277,6 +293,7 @@ def run_once(
                 cmd += ["--muser-bin", muser_bin]
             if force_minisat:
                 cmd += ["--force-minisat"]
+            cmd += method_flags
             cmd += [str(cnf_path)]
 
             with stdout_path.open("w", encoding="utf-8", errors="replace") as out_f, stderr_path.open(
@@ -508,7 +525,7 @@ def main() -> None:
     parser.add_argument(
         "--methods",
         default="marco,marco_adaptive",
-        help="Comma-separated methods: marco,marco_adaptive",
+        help="Comma-separated methods: marco,marco_basic,marco_plus,marco_adaptive",
     )
     parser.add_argument(
         "--instances",
@@ -551,7 +568,11 @@ def main() -> None:
     )
     parser.add_argument("--muser-bin", default="", help="Path to MUSer2 binary for paper MARCO")
     parser.add_argument("--force-minisat", action="store_true", help="Run paper MARCO with --force-minisat")
-    parser.add_argument("--baseline", default="marco", help="Baseline method for speedup reporting")
+    parser.add_argument(
+        "--baseline",
+        default="auto",
+        help="Baseline method for speedup reporting; use 'auto' to select the first method",
+    )
     parser.add_argument("--output-csv", default="", help="Write run-level CSV to this path")
     parser.add_argument("--verbose", action="store_true", help="Print per-run progress")
 
@@ -570,16 +591,15 @@ def main() -> None:
     args = parser.parse_args()
 
     methods = parse_csv_list(args.methods)
-    allowed = {"marco", "marco_adaptive"}
+    allowed = {"marco", "marco_basic", "marco_plus", "marco_adaptive"}
     for m in methods:
         if m not in allowed:
             raise ValueError(f"Unknown method '{m}'. Allowed: {', '.join(sorted(allowed))}")
-    baseline = args.baseline
-    if baseline not in methods:
-        if len(methods) == 1:
-            baseline = methods[0]
-        else:
-            raise ValueError("Baseline must be included in --methods")
+    baseline = args.baseline.strip()
+    if baseline in {"", "auto"}:
+        baseline = methods[0]
+    elif baseline not in methods:
+        raise ValueError("Baseline must be included in --methods")
 
     root = Path(args.dataset_root)
     if not root.exists():

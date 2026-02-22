@@ -71,7 +71,7 @@ def main() -> None:
     methods = parse_csv_list(args.methods)
     if not methods:
         raise ValueError("No methods specified")
-    allowed = {"marco", "marco_adaptive"}
+    allowed = {"marco", "marco_basic", "marco_plus", "marco_adaptive"}
     unknown = [m for m in methods if m not in allowed]
     if unknown:
         raise ValueError(f"Unknown methods: {', '.join(unknown)} (allowed: {', '.join(sorted(allowed))})")
