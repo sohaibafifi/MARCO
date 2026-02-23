@@ -8,6 +8,7 @@ Compares:
 - MARCO+ style variant (`marco.py --improved-implies`)
 - Adaptive variant from MARCO `marco_adaptive.py`
 - Smart adaptive/core variant from MARCO `marco_smart.py`
+- Portfolio variant from MARCO `marco_portfolio.py`
 
 The output schema mirrors bench_marco_sat11.py to reuse the same workflow.
 """
@@ -17,6 +18,7 @@ from __future__ import annotations
 import argparse
 import bz2
 import csv
+import hashlib
 import math
 import os
 import random
@@ -83,6 +85,9 @@ class RunRecord:
     first_output_s: Optional[float]
     first_mus_s: Optional[float]
     first_mcs_s: Optional[float]
+    mus_signature: str
+    mcs_signature: str
+    signature_ready: bool
     error: str
 
 
@@ -195,13 +200,19 @@ def _extract_bz2_to_temp(path: str, tmpdir: Path) -> Path:
     return dst
 
 
-def _parse_marco_output(stdout_path: Path) -> Tuple[int, int, int, Optional[float], Optional[float], Optional[float]]:
+def _parse_marco_output(
+    stdout_path: Path,
+    with_signatures: bool = False,
+) -> Tuple[int, int, int, Optional[float], Optional[float], Optional[float], str, str, bool]:
     outputs_count = 0
     mus_count = 0
     mcs_count = 0
     first_output_s: Optional[float] = None
     first_mus_s: Optional[float] = None
     first_mcs_s: Optional[float] = None
+    mus_items: List[str] = []
+    mcs_items: List[str] = []
+    signatures_ready = True
 
     with stdout_path.open("r", encoding="utf-8", errors="replace") as f:
         for raw in f:
@@ -216,27 +227,71 @@ def _parse_marco_output(stdout_path: Path) -> Tuple[int, int, int, Optional[floa
                 continue
 
             tval: Optional[float] = None
+            payload_start = 1
             if len(toks) > 1:
                 try:
                     tval = float(toks[1])
+                    payload_start = 2
                 except ValueError:
                     tval = None
+                    payload_start = 1
 
             outputs_count += 1
             if first_output_s is None and tval is not None:
                 first_output_s = tval
 
+            if with_signatures:
+                payload: List[int] = []
+                for tok in toks[payload_start:]:
+                    try:
+                        payload.append(int(tok))
+                    except ValueError:
+                        signatures_ready = False
+                        payload = []
+                        break
+                if not payload:
+                    signatures_ready = False
+                canonical = ",".join(str(x) for x in payload)
+
             if kind == "U":
                 mus_count += 1
                 if first_mus_s is None and tval is not None:
                     first_mus_s = tval
+                if with_signatures and signatures_ready:
+                    mus_items.append(canonical)
             else:
                 # "S" is MSS in MARCO output; count it in mcs_count for parity with CPMPy benchmark schema.
                 mcs_count += 1
                 if first_mcs_s is None and tval is not None:
                     first_mcs_s = tval
+                if with_signatures and signatures_ready:
+                    mcs_items.append(canonical)
 
-    return outputs_count, mus_count, mcs_count, first_output_s, first_mus_s, first_mcs_s
+    mus_signature = ""
+    mcs_signature = ""
+    if with_signatures and signatures_ready:
+        h_mus = hashlib.blake2b(digest_size=16)
+        h_mcs = hashlib.blake2b(digest_size=16)
+        for row in sorted(mus_items):
+            h_mus.update(row.encode("utf-8"))
+            h_mus.update(b"\n")
+        for row in sorted(mcs_items):
+            h_mcs.update(row.encode("utf-8"))
+            h_mcs.update(b"\n")
+        mus_signature = h_mus.hexdigest()
+        mcs_signature = h_mcs.hexdigest()
+
+    return (
+        outputs_count,
+        mus_count,
+        mcs_count,
+        first_output_s,
+        first_mus_s,
+        first_mcs_s,
+        mus_signature,
+        mcs_signature,
+        with_signatures and signatures_ready,
+    )
 
 
 def run_once(
@@ -254,13 +309,13 @@ def run_once(
     core_base_ratio: int,
     core_backoff_cap: int,
     core_no_certify: bool,
+    portfolio_smart_after_mus: int,
+    portfolio_smart_after_outputs: int,
     validate: bool,
     verify_unsat: bool,
     marco_root: Path,
 ) -> RunRecord:
-    # Validation and unsat pre-check are currently not implemented in the paper runner.
-    # Keep flags for workflow compatibility.
-    del validate
+    # verify_unsat remains unimplemented for this paper runner.
     del verify_unsat
 
     if method_name == "marco":
@@ -278,10 +333,13 @@ def run_once(
     elif method_name == "marco_smart":
         script_name = "marco_smart.py"
         method_flags = []
+    elif method_name == "marco_portfolio":
+        script_name = "marco_portfolio.py"
+        method_flags = []
     else:
         raise ValueError(f"Unknown method: {method_name}")
 
-    if method_name in {"marco_adaptive", "marco_smart"}:
+    if method_name in {"marco_adaptive", "marco_smart", "marco_portfolio"}:
         if no_feedback:
             method_flags += ["--feedback-disable"]
         if core_handoff != -1:
@@ -290,6 +348,9 @@ def run_once(
         method_flags += ["--core-backoff-cap", str(core_backoff_cap)]
         if core_no_certify:
             method_flags += ["--core-no-certify"]
+    if method_name == "marco_portfolio":
+        method_flags += ["--portfolio-smart-after-mus", str(portfolio_smart_after_mus)]
+        method_flags += ["--portfolio-smart-after-outputs", str(portfolio_smart_after_outputs)]
 
     script_path = marco_root / script_name
 
@@ -317,6 +378,9 @@ def run_once(
                 cmd += ["--muser-bin", muser_bin]
             if force_minisat:
                 cmd += ["--force-minisat"]
+            if validate:
+                # Needed to obtain full result sets for cross-method signature checks.
+                cmd += ["-v"]
             cmd += method_flags
             cmd += [str(cnf_path)]
 
@@ -345,7 +409,17 @@ def run_once(
                     first_err = lines[0] if lines else f"exitcode={proc.returncode}"
                     error = strip_ansi(first_err).strip()
 
-            outputs_count, mus_count, mcs_count, first_output_s, first_mus_s, first_mcs_s = _parse_marco_output(stdout_path)
+            (
+                outputs_count,
+                mus_count,
+                mcs_count,
+                first_output_s,
+                first_mus_s,
+                first_mcs_s,
+                mus_signature,
+                mcs_signature,
+                signature_ready,
+            ) = _parse_marco_output(stdout_path, with_signatures=validate)
 
             elapsed = time.perf_counter() - t0
             return RunRecord(
@@ -364,6 +438,9 @@ def run_once(
                 first_output_s=first_output_s,
                 first_mus_s=first_mus_s,
                 first_mcs_s=first_mcs_s,
+                mus_signature=mus_signature,
+                mcs_signature=mcs_signature,
+                signature_ready=signature_ready,
                 error=error,
             )
     except Exception as exc:  # pragma: no cover
@@ -384,6 +461,9 @@ def run_once(
             first_output_s=None,
             first_mus_s=None,
             first_mcs_s=None,
+            mus_signature="",
+            mcs_signature="",
+            signature_ready=False,
             error=str(exc),
         )
 
@@ -471,6 +551,53 @@ def print_failure_summary(records: List[RunRecord]) -> None:
             print(f"    {cnt}x {err}")
 
 
+def apply_cross_method_validation(records: List[RunRecord], baseline: str) -> Tuple[int, int]:
+    """
+    Compare MUS/MCS signatures against baseline for same (instance, run_id).
+
+    Returns:
+      (num_checked, num_mismatch)
+    """
+    key_to_base: Dict[Tuple[str, int], RunRecord] = {}
+    for rec in records:
+        if rec.method != baseline:
+            continue
+        key_to_base[(rec.instance, rec.run_id)] = rec
+
+    checked = 0
+    mismatch = 0
+    for rec in records:
+        if rec.method == baseline:
+            continue
+        if not rec.success or not rec.completed:
+            continue
+        base = key_to_base.get((rec.instance, rec.run_id))
+        if base is None or (not base.success) or (not base.completed):
+            continue
+        if not (rec.signature_ready and base.signature_ready):
+            rec.valid_mus = False
+            rec.valid_mcs = False
+            rec.error = (rec.error + "; " if rec.error else "") + "validation_signature_unavailable"
+            mismatch += 1
+            checked += 1
+            continue
+
+        checked += 1
+        same = (
+            rec.outputs_count == base.outputs_count
+            and rec.mus_count == base.mus_count
+            and rec.mcs_count == base.mcs_count
+            and rec.mus_signature == base.mus_signature
+            and rec.mcs_signature == base.mcs_signature
+        )
+        if not same:
+            rec.valid_mus = False
+            rec.valid_mcs = False
+            rec.error = (rec.error + "; " if rec.error else "") + f"validation_mismatch_vs_{baseline}"
+            mismatch += 1
+    return checked, mismatch
+
+
 def write_csv(path: Path, runs: List[RunRecord], summary_rows: List[MethodSummary]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as f:
@@ -492,6 +619,9 @@ def write_csv(path: Path, runs: List[RunRecord], summary_rows: List[MethodSummar
                 "first_output_s",
                 "first_mus_s",
                 "first_mcs_s",
+                "mus_signature",
+                "mcs_signature",
+                "signature_ready",
                 "error",
             ]
         )
@@ -513,6 +643,9 @@ def write_csv(path: Path, runs: List[RunRecord], summary_rows: List[MethodSummar
                     "" if r.first_output_s is None else f"{r.first_output_s:.9f}",
                     "" if r.first_mus_s is None else f"{r.first_mus_s:.9f}",
                     "" if r.first_mcs_s is None else f"{r.first_mcs_s:.9f}",
+                    r.mus_signature,
+                    r.mcs_signature,
+                    r.signature_ready,
                     r.error,
                 ]
             )
@@ -570,8 +703,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--methods",
-        default="marco,marco_adaptive,marco_smart",
-        help="Comma-separated methods: marco,marco_basic,marco_plus,marco_adaptive,marco_smart",
+        default="marco,marco_adaptive,marco_smart,marco_portfolio",
+        help="Comma-separated methods: marco,marco_basic,marco_plus,marco_adaptive,marco_smart,marco_portfolio",
     )
     parser.add_argument(
         "--instances",
@@ -604,7 +737,7 @@ def main() -> None:
         help="Cap outputs per run via MARCO --limit (<=0 means unbounded)",
     )
     parser.add_argument("--verify-unsat", action="store_true", help="Accepted for compatibility (currently no-op)")
-    parser.add_argument("--validate", action="store_true", help="Accepted for compatibility (currently no-op)")
+    parser.add_argument("--validate", action="store_true", help="Enable cross-method output-signature validation vs baseline")
 
     parser.add_argument(
         "--threads",
@@ -623,6 +756,8 @@ def main() -> None:
     parser.add_argument("--core-base-ratio", type=int, default=2, help="marco_smart base batch ratio")
     parser.add_argument("--core-backoff-cap", type=int, default=8, help="marco_smart SAT backoff cap")
     parser.add_argument("--core-no-certify", action="store_true", help="Disable marco_smart final certification")
+    parser.add_argument("--portfolio-smart-after-mus", type=int, default=1, help="marco_portfolio smart-core activation MUS threshold")
+    parser.add_argument("--portfolio-smart-after-outputs", type=int, default=0, help="marco_portfolio smart-core activation output threshold")
     parser.add_argument("--no-feedback", action="store_true", help="Disable adaptive/smart feedback clauses")
     parser.add_argument(
         "--baseline",
@@ -643,7 +778,7 @@ def main() -> None:
     args = parser.parse_args()
 
     methods = parse_csv_list(args.methods)
-    allowed = {"marco", "marco_basic", "marco_plus", "marco_adaptive", "marco_smart"}
+    allowed = {"marco", "marco_basic", "marco_plus", "marco_adaptive", "marco_smart", "marco_portfolio"}
     for m in methods:
         if m not in allowed:
             raise ValueError(f"Unknown method '{m}'. Allowed: {', '.join(sorted(allowed))}")
@@ -676,8 +811,6 @@ def main() -> None:
     if not selected:
         raise ValueError("No instances selected after filtering")
 
-    if args.validate:
-        print("[warn] --validate is currently a no-op in bench_marco_sat11.py")
     if args.verify_unsat:
         print("[warn] --verify-unsat is currently a no-op in bench_marco_sat11.py")
 
@@ -701,6 +834,9 @@ def main() -> None:
     print(f"  core_ratio    : {args.core_base_ratio}")
     print(f"  core_backoff  : {args.core_backoff_cap}")
     print(f"  core_certify  : {not args.core_no_certify}")
+    print(f"  portfolio_mus  : {args.portfolio_smart_after_mus}")
+    print(f"  portfolio_out  : {args.portfolio_smart_after_outputs}")
+    print(f"  validate      : {args.validate}")
 
     run_records: List[RunRecord] = []
     total_jobs = len(selected) * len(methods) * (args.warmup + args.repeats)
@@ -730,6 +866,8 @@ def main() -> None:
                     core_base_ratio=args.core_base_ratio,
                     core_backoff_cap=args.core_backoff_cap,
                     core_no_certify=args.core_no_certify,
+                    portfolio_smart_after_mus=args.portfolio_smart_after_mus,
+                    portfolio_smart_after_outputs=args.portfolio_smart_after_outputs,
                     validate=False,
                     verify_unsat=False,
                     marco_root=marco_root,
@@ -754,6 +892,8 @@ def main() -> None:
                     core_base_ratio=args.core_base_ratio,
                     core_backoff_cap=args.core_backoff_cap,
                     core_no_certify=args.core_no_certify,
+                    portfolio_smart_after_mus=args.portfolio_smart_after_mus,
+                    portfolio_smart_after_outputs=args.portfolio_smart_after_outputs,
                     validate=args.validate,
                     verify_unsat=args.verify_unsat,
                     marco_root=marco_root,
@@ -770,6 +910,10 @@ def main() -> None:
                     )
                     if rec.error and rec.error != "timeout":
                         print(f"    error: {rec.error.splitlines()[0]}")
+
+    if args.validate:
+        checked, mismatch = apply_cross_method_validation(run_records, baseline=baseline)
+        print(f"\nValidation vs baseline '{baseline}': checked={checked}, mismatch={mismatch}")
 
     summary_rows = summarize(run_records)
     print_method_summary(summary_rows, baseline=baseline)

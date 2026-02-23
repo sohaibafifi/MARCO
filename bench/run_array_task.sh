@@ -50,6 +50,8 @@ CORE_HANDOFF="${CORE_HANDOFF:--1}"
 CORE_BASE_RATIO="${CORE_BASE_RATIO:-2}"
 CORE_BACKOFF_CAP="${CORE_BACKOFF_CAP:-8}"
 CORE_NO_CERTIFY="${CORE_NO_CERTIFY:-0}"
+PORTFOLIO_SMART_AFTER_MUS="${PORTFOLIO_SMART_AFTER_MUS:-1}"
+PORTFOLIO_SMART_AFTER_OUTPUTS="${PORTFOLIO_SMART_AFTER_OUTPUTS:-0}"
 
 UV_BIN="${UV_BIN:-}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
@@ -200,6 +202,8 @@ CMD=(
   --core-handoff "$CORE_HANDOFF"
   --core-base-ratio "$CORE_BASE_RATIO"
   --core-backoff-cap "$CORE_BACKOFF_CAP"
+  --portfolio-smart-after-mus "$PORTFOLIO_SMART_AFTER_MUS"
+  --portfolio-smart-after-outputs "$PORTFOLIO_SMART_AFTER_OUTPUTS"
   --output-csv "$CSV_OUT"
 )
 if [[ -n "${MUSER_BIN}" ]]; then
@@ -227,7 +231,7 @@ fi
 echo "[task] id=${TASK_LABEL} method=${method} rep=${rep_id}"
 echo "[task] instance=${instance_rel}"
 echo "[task] threads=${THREADS} force_minisat=${FORCE_MINISAT}"
-echo "[task] no_feedback=${NO_FEEDBACK} core_handoff=${CORE_HANDOFF} core_ratio=${CORE_BASE_RATIO} core_backoff=${CORE_BACKOFF_CAP} core_no_certify=${CORE_NO_CERTIFY}"
+echo "[task] no_feedback=${NO_FEEDBACK} core_handoff=${CORE_HANDOFF} core_ratio=${CORE_BASE_RATIO} core_backoff=${CORE_BACKOFF_CAP} core_no_certify=${CORE_NO_CERTIFY} portfolio_mus=${PORTFOLIO_SMART_AFTER_MUS} portfolio_out=${PORTFOLIO_SMART_AFTER_OUTPUTS}"
 if [[ -n "${MUSER_BIN}" ]]; then
   echo "[task] muser_bin=${MUSER_BIN}"
 fi

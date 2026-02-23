@@ -13,6 +13,7 @@ Available benchmark methods:
 - `marco_plus`: MARCO+ style (`marco.py --improved-implies`)
 - `marco_adaptive`: adaptive variant (`marco_adaptive.py`)
 - `marco_smart`: adaptive + smart-core shrink (`marco_smart.py`, enables `--adaptive --smart-core`)
+- `marco_portfolio`: adaptive + smart-core with delayed smart activation (`marco_portfolio.py`)
 
 ## Quick Local Check
 
@@ -22,7 +23,7 @@ cd /path/to/MARCO
 uv run python bench/bench_marco_sat11.py \
   --dataset-root /path/to/SAT11-Competition-MUS-SelectedBenchmarks \
   --marco-root "$PWD" \
-  --methods marco_adaptive,marco_smart \
+  --methods marco_adaptive,marco_smart,marco_portfolio \
   --baseline marco_adaptive \
   --max-files 1 \
   --repeats 1 \
@@ -49,7 +50,7 @@ python3 bench/build_manifest.py \
 ```bash
 python3 bench/build_array_params.py \
   --manifest bench/sat11_manifest.tsv \
-  --methods marco,marco_adaptive,marco_smart \
+  --methods marco,marco_adaptive,marco_smart,marco_portfolio \
   --repeats 1 \
   --threads 1 \
   --output bench/array_params.tsv
@@ -145,8 +146,10 @@ python3 bench/collect_results.py \
 - `CORE_BASE_RATIO` (default `2`, `marco_smart`)
 - `CORE_BACKOFF_CAP` (default `8`, `marco_smart`)
 - `CORE_NO_CERTIFY` (`0`/`1`, disables final smart-core certification)
+- `PORTFOLIO_SMART_AFTER_MUS` (default `1`, MUS outputs before enabling smart-core in `marco_portfolio`)
+- `PORTFOLIO_SMART_AFTER_OUTPUTS` (default `0`, total outputs threshold before enabling smart-core in `marco_portfolio`)
 - `MAX_OUTPUTS`
-- `RUN_VALIDATE` (`0`/`1`, currently no-op in runner)
+- `RUN_VALIDATE` (`0`/`1`, enables cross-method output-signature validation vs baseline in runner)
 - `RUN_VERIFY_UNSAT` (`0`/`1`, currently no-op in runner)
 - `RUN_VERBOSE` (`0`/`1`)
 - `UV_BIN` or `PYTHON_BIN`

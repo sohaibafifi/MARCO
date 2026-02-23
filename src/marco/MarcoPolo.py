@@ -51,6 +51,20 @@ class MarcoPolo(object):
         self.known_muses: List[Set[int]] = []
         self.known_mus_keys = set()
         self._deletion_order = self._build_deletion_order()
+        self.total_outputs = 0
+        self.mus_outputs = 0
+
+        # Portfolio policy: start cheap (no smart-core shrink), then enable smart-core
+        # after enough evidence (MUS and/or output count) so early timeout risk is lower.
+        self.portfolio = bool(self.config.get('portfolio', False))
+        self.portfolio_smart_after_mus = max(0, int(self.config.get('portfolio_smart_after_mus', 1)))
+        self.portfolio_smart_after_outputs = max(0, int(self.config.get('portfolio_smart_after_outputs', 0)))
+        self.smart_core_target = bool(self.smart_core)
+        if self.portfolio and self.smart_core_target:
+            self.smart_core_active = False
+            self.stats.increment_counter("portfolio.smart.delayed")
+        else:
+            self.smart_core_active = bool(self.smart_core_target)
 
         self.pipe = pipe
         # if a pipe is provided, use it to receive results from other enumerators
@@ -372,7 +386,22 @@ class MarcoPolo(object):
         self.config['bias'] = 'MUSes' if mus_bias else 'MCSes'
         self.stats.increment_counter("adaptive.switch.%s" % ("MUS" if mus_bias else "MCS"))
 
+    def _maybe_activate_smart_core(self):
+        if not self.portfolio or not self.smart_core_target or self.smart_core_active:
+            return
+        if self.mus_outputs < self.portfolio_smart_after_mus:
+            return
+        if self.total_outputs < self.portfolio_smart_after_outputs:
+            return
+        self.smart_core_active = True
+        self.stats.increment_counter("portfolio.smart.enabled")
+
     def _record_result(self, result_type):
+        self.total_outputs += 1
+        if result_type == 'U':
+            self.mus_outputs += 1
+        self._maybe_activate_smart_core()
+
         if not self.adaptive:
             return
         self._recent_outputs.append(result_type)
@@ -479,14 +508,14 @@ class MarcoPolo(object):
                 core_seed = set(seed)
                 if known_max:
                     MUS = sorted(set(seed))
-                    if self.smart_core:
+                    if self.smart_core_active:
                         self._update_core_intersection(seed_from_map, core_seed)
                         self._record_known_mus(set(MUS))
                 else:
                     with self.stats.time('shrink'):
                         oldlen = len(seed)
 
-                        if self.smart_core:
+                        if self.smart_core_active:
                             MUS = self._shrink_smart(seed_from_map, core_seed)
                         else:
                             MUS = self.subs.shrink(seed)
@@ -513,7 +542,7 @@ class MarcoPolo(object):
                         pass
 
                     self.map.block_up(MUS)
-                    if self.smart_core and core_seed and set(MUS) != core_seed:
+                    if self.smart_core_active and core_seed and set(MUS) != core_seed:
                         self.map.block_up(core_seed)
                         self.stats.increment_counter("smart.block.core")
                     self._record_result(res[0])

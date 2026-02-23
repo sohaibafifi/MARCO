@@ -33,7 +33,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--methods",
-        default="marco,marco_adaptive,marco_smart",
+        default="marco,marco_adaptive,marco_smart,marco_portfolio",
         help="Comma-separated methods",
     )
     parser.add_argument("--repeats", type=int, default=1, help="Number of repeats per instance/method")
@@ -71,7 +71,7 @@ def main() -> None:
     methods = parse_csv_list(args.methods)
     if not methods:
         raise ValueError("No methods specified")
-    allowed = {"marco", "marco_basic", "marco_plus", "marco_adaptive", "marco_smart"}
+    allowed = {"marco", "marco_basic", "marco_plus", "marco_adaptive", "marco_smart", "marco_portfolio"}
     unknown = [m for m in methods if m not in allowed]
     if unknown:
         raise ValueError(f"Unknown methods: {', '.join(unknown)} (allowed: {', '.join(sorted(allowed))})")

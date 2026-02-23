@@ -140,6 +140,12 @@ def parse_args(args_list=None):
                            help="smart-core SAT backoff exponent cap (default: 8).")
     exp_group.add_argument('--core-no-certify', action='store_true',
                            help="disable final MUS certification pass in smart-core mode.")
+    exp_group.add_argument('--portfolio', action='store_true',
+                           help="enable portfolio policy (delay smart-core until enough evidence).")
+    exp_group.add_argument('--portfolio-smart-after-mus', type=int, default=1,
+                           help="in portfolio mode, enable smart-core after this many MUS outputs (default: 1).")
+    exp_group.add_argument('--portfolio-smart-after-outputs', type=int, default=0,
+                           help="in portfolio mode, also require this many total outputs before enabling smart-core (default: 0).")
     comms_group = exp_group.add_mutually_exclusive_group()
     comms_group.add_argument('--comms-disable', action='store_true',
                              help="disable the communications between children (i.e., when the master receives a result from a child, it won't send to other children).")
@@ -189,6 +195,10 @@ def check_args(args):
         error_exit("Invalid smart-core option.", "--core-base-ratio must be >= 1.")
     if args.core_backoff_cap < 0:
         error_exit("Invalid smart-core option.", "--core-backoff-cap must be >= 0.")
+    if args.portfolio_smart_after_mus < 0:
+        error_exit("Invalid portfolio option.", "--portfolio-smart-after-mus must be >= 0.")
+    if args.portfolio_smart_after_outputs < 0:
+        error_exit("Invalid portfolio option.", "--portfolio-smart-after-outputs must be >= 0.")
 
 
 def at_exit(stats):
@@ -392,6 +402,9 @@ def get_config(args):
     config['core_base_ratio'] = args.core_base_ratio
     config['core_backoff_cap'] = args.core_backoff_cap
     config['core_certify'] = not args.core_no_certify
+    config['portfolio'] = args.portfolio
+    config['portfolio_smart_after_mus'] = args.portfolio_smart_after_mus
+    config['portfolio_smart_after_outputs'] = args.portfolio_smart_after_outputs
 
     return config
 
