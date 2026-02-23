@@ -32,6 +32,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 
 P_HEADER = re.compile(r"^p\s+cnf\s+(\d+)\s+(\d+)\s*$")
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 SCRIPT_DIR = Path(__file__).resolve().parent
 MARCO_ROOT_DEFAULT = SCRIPT_DIR.parent
 
@@ -110,6 +111,10 @@ def percentile(values: Sequence[float], p: float) -> Optional[float]:
 
 def parse_csv_list(raw: str) -> List[str]:
     return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+def strip_ansi(text: str) -> str:
+    return ANSI_ESCAPE.sub("", text or "")
 
 
 def read_dimacs_header(path: Path) -> Tuple[Optional[int], Optional[int]]:
@@ -336,8 +341,9 @@ def run_once(
                 if timed_out:
                     error = "timeout"
                 else:
-                    first_err = stderr_text.splitlines()[0] if stderr_text.strip() else f"exitcode={proc.returncode}"
-                    error = first_err
+                    lines = [ln for ln in stderr_text.splitlines() if ln.strip()]
+                    first_err = lines[0] if lines else f"exitcode={proc.returncode}"
+                    error = strip_ansi(first_err).strip()
 
             outputs_count, mus_count, mcs_count, first_output_s, first_mus_s, first_mcs_s = _parse_marco_output(stdout_path)
 
@@ -442,6 +448,27 @@ def print_method_summary(rows: List[MethodSummary], baseline: str) -> None:
                 print(f"  {row.method:16} n/a")
                 continue
             print(f"  {row.method:16} x{base.median_ms / row.median_ms:.3f}")
+
+
+def print_failure_summary(records: List[RunRecord]) -> None:
+    failures = [r for r in records if not r.success]
+    if not failures:
+        return
+
+    print("\nFailures")
+    by_method: Dict[str, List[RunRecord]] = {}
+    for rec in failures:
+        by_method.setdefault(rec.method, []).append(rec)
+
+    for method in sorted(by_method):
+        rows = by_method[method]
+        print(f"  {method}: {len(rows)} failed run(s)")
+        by_error: Dict[str, int] = {}
+        for rec in rows:
+            key = rec.error.strip() if rec.error.strip() else "unknown error"
+            by_error[key] = by_error.get(key, 0) + 1
+        for err, cnt in sorted(by_error.items(), key=lambda kv: (-kv[1], kv[0]))[:3]:
+            print(f"    {cnt}x {err}")
 
 
 def write_csv(path: Path, runs: List[RunRecord], summary_rows: List[MethodSummary]) -> None:
@@ -746,6 +773,7 @@ def main() -> None:
 
     summary_rows = summarize(run_records)
     print_method_summary(summary_rows, baseline=baseline)
+    print_failure_summary(run_records)
 
     if args.output_csv:
         write_csv(Path(args.output_csv), run_records, summary_rows)

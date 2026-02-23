@@ -150,3 +150,6 @@ python3 bench/collect_results.py \
 - `RUN_VERIFY_UNSAT` (`0`/`1`, currently no-op in runner)
 - `RUN_VERBOSE` (`0`/`1`)
 - `UV_BIN` or `PYTHON_BIN`
+
+If `FORCE_MINISAT=0`, MARCO needs a working MUSer2 binary.
+Set `MUSER_BIN=/absolute/path/to/muser-2` (preferred) or `MUSER2_PATH=...`.
