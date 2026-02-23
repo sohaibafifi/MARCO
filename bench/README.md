@@ -1,6 +1,6 @@
 # MARCO Bench Workflow (SAT11)
 
-Standalone benchmark workflow for MARCO paper code (`marco` and `marco_adaptive`) under `MARCO/bench`.
+Standalone benchmark workflow for MARCO code under `MARCO/bench`.
 
 Runner:
 
@@ -12,6 +12,7 @@ Available benchmark methods:
 - `marco_basic`: MARCO without maximization (`marco.py --nomax`)
 - `marco_plus`: MARCO+ style (`marco.py --improved-implies`)
 - `marco_adaptive`: adaptive variant (`marco_adaptive.py`)
+- `marco_smart`: adaptive + smart-core shrink (`marco_smart.py`, enables `--adaptive --smart-core`)
 
 ## Quick Local Check
 
@@ -21,8 +22,8 @@ cd /path/to/MARCO
 uv run python bench/bench_marco_sat11.py \
   --dataset-root /path/to/SAT11-Competition-MUS-SelectedBenchmarks \
   --marco-root "$PWD" \
-  --methods marco_basic,marco_plus \
-  --baseline marco_basic \
+  --methods marco_adaptive,marco_smart \
+  --baseline marco_adaptive \
   --max-files 1 \
   --repeats 1 \
   --warmup 0 \
@@ -48,7 +49,7 @@ python3 bench/build_manifest.py \
 ```bash
 python3 bench/build_array_params.py \
   --manifest bench/sat11_manifest.tsv \
-  --methods marco_basic,marco_plus \
+  --methods marco,marco_adaptive,marco_smart \
   --repeats 1 \
   --threads 1 \
   --output bench/array_params.tsv
@@ -139,6 +140,11 @@ python3 bench/collect_results.py \
 - `THREADS` (default `1`)
 - `MUSER_BIN` (optional)
 - `FORCE_MINISAT` (`0`/`1`)
+- `NO_FEEDBACK` (`0`/`1`, disables adaptive/smart feedback clauses)
+- `CORE_HANDOFF` (default `-1`, auto threshold for `marco_smart`)
+- `CORE_BASE_RATIO` (default `2`, `marco_smart`)
+- `CORE_BACKOFF_CAP` (default `8`, `marco_smart`)
+- `CORE_NO_CERTIFY` (`0`/`1`, disables final smart-core certification)
 - `MAX_OUTPUTS`
 - `RUN_VALIDATE` (`0`/`1`, currently no-op in runner)
 - `RUN_VERIFY_UNSAT` (`0`/`1`, currently no-op in runner)

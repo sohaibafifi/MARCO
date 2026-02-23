@@ -34,6 +34,15 @@ echo "  total rows    : $N_ROWS"
 echo "  resources     : core=$CORES walltime=$WALLTIME"
 
 COMMON_ENV="MARCO_ROOT=$MARCO_ROOT REPO_ROOT=$REPO_ROOT RESULTS_DIR=$RESULTS_DIR"
+for v in \
+  DATASET_ROOT TIMEOUT_S MAX_OUTPUTS RUN_VALIDATE RUN_VERIFY_UNSAT RUN_VERBOSE \
+  THREADS MUSER_BIN FORCE_MINISAT NO_FEEDBACK \
+  CORE_HANDOFF CORE_BASE_RATIO CORE_BACKOFF_CAP CORE_NO_CERTIFY \
+  UV_BIN PYTHON_BIN; do
+  if [[ -n "${!v:-}" ]]; then
+    COMMON_ENV="$COMMON_ENV $v=${!v}"
+  fi
+done
 
 if [[ "$USE_LOOP" == "1" ]]; then
   echo "Using loop submission mode (params file + task index)"

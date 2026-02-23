@@ -130,6 +130,16 @@ def parse_args(args_list=None):
                            help="max clause length for UNSAT feedback block_up clauses (default: 12; <0 disables limit).")
     exp_group.add_argument('--feedback-max-clauses', type=int, default=2000,
                            help="max number of learned feedback clauses (default: 2000; <=0 is unbounded).")
+    exp_group.add_argument('--smart-core', action='store_true',
+                           help="enable core-guided smart shrinking (BiCore-QX + MUS certification).")
+    exp_group.add_argument('--core-handoff', type=int, default=-1,
+                           help="smart-core handoff threshold; -1 picks max(8, n/3).")
+    exp_group.add_argument('--core-base-ratio', type=int, default=2,
+                           help="smart-core batch base ratio (default: 2).")
+    exp_group.add_argument('--core-backoff-cap', type=int, default=8,
+                           help="smart-core SAT backoff exponent cap (default: 8).")
+    exp_group.add_argument('--core-no-certify', action='store_true',
+                           help="disable final MUS certification pass in smart-core mode.")
     comms_group = exp_group.add_mutually_exclusive_group()
     comms_group.add_argument('--comms-disable', action='store_true',
                              help="disable the communications between children (i.e., when the master receives a result from a child, it won't send to other children).")
@@ -173,6 +183,12 @@ def check_args(args):
         error_exit("Invalid adaptive option.", "--adaptive-target-mus-ratio must be in [0,1].")
     if args.adaptive_hysteresis < 0.0:
         error_exit("Invalid adaptive option.", "--adaptive-hysteresis must be >= 0.")
+    if args.core_handoff != -1 and args.core_handoff < 1:
+        error_exit("Invalid smart-core option.", "--core-handoff must be -1 or >= 1.")
+    if args.core_base_ratio < 1:
+        error_exit("Invalid smart-core option.", "--core-base-ratio must be >= 1.")
+    if args.core_backoff_cap < 0:
+        error_exit("Invalid smart-core option.", "--core-backoff-cap must be >= 0.")
 
 
 def at_exit(stats):
@@ -367,10 +383,15 @@ def get_config(args):
     config['adaptive_min_outputs'] = args.adaptive_min_outputs
     config['adaptive_target_mus_ratio'] = args.adaptive_target_mus_ratio
     config['adaptive_hysteresis'] = args.adaptive_hysteresis
-    config['feedback_enabled'] = (args.adaptive and not args.feedback_disable)
+    config['feedback_enabled'] = ((args.adaptive or args.smart_core) and not args.feedback_disable)
     config['feedback_sat_clause_max'] = args.feedback_sat_clause_max
     config['feedback_unsat_clause_max'] = args.feedback_unsat_clause_max
     config['feedback_max_clauses'] = args.feedback_max_clauses
+    config['smart_core'] = args.smart_core
+    config['core_handoff'] = args.core_handoff
+    config['core_base_ratio'] = args.core_base_ratio
+    config['core_backoff_cap'] = args.core_backoff_cap
+    config['core_certify'] = not args.core_no_certify
 
     return config
 

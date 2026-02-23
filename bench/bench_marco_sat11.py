@@ -7,6 +7,7 @@ Compares:
 - MARCO basic variant (`marco.py --nomax`)
 - MARCO+ style variant (`marco.py --improved-implies`)
 - Adaptive variant from MARCO `marco_adaptive.py`
+- Smart adaptive/core variant from MARCO `marco_smart.py`
 
 The output schema mirrors bench_marco_sat11.py to reuse the same workflow.
 """
@@ -243,6 +244,11 @@ def run_once(
     muser_bin: str,
     force_minisat: bool,
     threads: int,
+    no_feedback: bool,
+    core_handoff: int,
+    core_base_ratio: int,
+    core_backoff_cap: int,
+    core_no_certify: bool,
     validate: bool,
     verify_unsat: bool,
     marco_root: Path,
@@ -264,8 +270,21 @@ def run_once(
     elif method_name == "marco_adaptive":
         script_name = "marco_adaptive.py"
         method_flags = []
+    elif method_name == "marco_smart":
+        script_name = "marco_smart.py"
+        method_flags = []
     else:
         raise ValueError(f"Unknown method: {method_name}")
+
+    if method_name in {"marco_adaptive", "marco_smart"}:
+        if no_feedback:
+            method_flags += ["--feedback-disable"]
+        if core_handoff != -1:
+            method_flags += ["--core-handoff", str(core_handoff)]
+        method_flags += ["--core-base-ratio", str(core_base_ratio)]
+        method_flags += ["--core-backoff-cap", str(core_backoff_cap)]
+        if core_no_certify:
+            method_flags += ["--core-no-certify"]
 
     script_path = marco_root / script_name
 
@@ -524,8 +543,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--methods",
-        default="marco,marco_adaptive",
-        help="Comma-separated methods: marco,marco_basic,marco_plus,marco_adaptive",
+        default="marco,marco_adaptive,marco_smart",
+        help="Comma-separated methods: marco,marco_basic,marco_plus,marco_adaptive,marco_smart",
     )
     parser.add_argument(
         "--instances",
@@ -569,6 +588,16 @@ def main() -> None:
     parser.add_argument("--muser-bin", default="", help="Path to MUSer2 binary for paper MARCO")
     parser.add_argument("--force-minisat", action="store_true", help="Run paper MARCO with --force-minisat")
     parser.add_argument(
+        "--core-handoff",
+        type=int,
+        default=-1,
+        help="marco_smart/core handoff threshold; -1 picks default",
+    )
+    parser.add_argument("--core-base-ratio", type=int, default=2, help="marco_smart base batch ratio")
+    parser.add_argument("--core-backoff-cap", type=int, default=8, help="marco_smart SAT backoff cap")
+    parser.add_argument("--core-no-certify", action="store_true", help="Disable marco_smart final certification")
+    parser.add_argument("--no-feedback", action="store_true", help="Disable adaptive/smart feedback clauses")
+    parser.add_argument(
         "--baseline",
         default="auto",
         help="Baseline method for speedup reporting; use 'auto' to select the first method",
@@ -580,10 +609,6 @@ def main() -> None:
     parser.add_argument("--solver", default="", help=argparse.SUPPRESS)
     parser.add_argument("--map-solver", default="", help=argparse.SUPPRESS)
     parser.add_argument("--no-solution-hint", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--core-handoff", type=int, default=-1, help=argparse.SUPPRESS)
-    parser.add_argument("--core-base-ratio", type=int, default=2, help=argparse.SUPPRESS)
-    parser.add_argument("--core-backoff-cap", type=int, default=8, help=argparse.SUPPRESS)
-    parser.add_argument("--no-feedback", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--feedback-sat-clause-max", type=int, default=12, help=argparse.SUPPRESS)
     parser.add_argument("--feedback-unsat-clause-max", type=int, default=12, help=argparse.SUPPRESS)
     parser.add_argument("--feedback-max-clauses", type=int, default=2000, help=argparse.SUPPRESS)
@@ -591,7 +616,7 @@ def main() -> None:
     args = parser.parse_args()
 
     methods = parse_csv_list(args.methods)
-    allowed = {"marco", "marco_basic", "marco_plus", "marco_adaptive"}
+    allowed = {"marco", "marco_basic", "marco_plus", "marco_adaptive", "marco_smart"}
     for m in methods:
         if m not in allowed:
             raise ValueError(f"Unknown method '{m}'. Allowed: {', '.join(sorted(allowed))}")
@@ -644,6 +669,11 @@ def main() -> None:
     print(f"  threads       : {args.threads}")
     print(f"  force_minisat : {args.force_minisat}")
     print(f"  muser_bin     : {muser_bin if muser_bin else '(default lookup)'}")
+    print(f"  no_feedback   : {args.no_feedback}")
+    print(f"  core_handoff  : {args.core_handoff}")
+    print(f"  core_ratio    : {args.core_base_ratio}")
+    print(f"  core_backoff  : {args.core_backoff_cap}")
+    print(f"  core_certify  : {not args.core_no_certify}")
 
     run_records: List[RunRecord] = []
     total_jobs = len(selected) * len(methods) * (args.warmup + args.repeats)
@@ -668,6 +698,11 @@ def main() -> None:
                     muser_bin=muser_bin,
                     force_minisat=args.force_minisat,
                     threads=args.threads,
+                    no_feedback=args.no_feedback,
+                    core_handoff=args.core_handoff,
+                    core_base_ratio=args.core_base_ratio,
+                    core_backoff_cap=args.core_backoff_cap,
+                    core_no_certify=args.core_no_certify,
                     validate=False,
                     verify_unsat=False,
                     marco_root=marco_root,
@@ -687,6 +722,11 @@ def main() -> None:
                     muser_bin=muser_bin,
                     force_minisat=args.force_minisat,
                     threads=args.threads,
+                    no_feedback=args.no_feedback,
+                    core_handoff=args.core_handoff,
+                    core_base_ratio=args.core_base_ratio,
+                    core_backoff_cap=args.core_backoff_cap,
+                    core_no_certify=args.core_no_certify,
                     validate=args.validate,
                     verify_unsat=args.verify_unsat,
                     marco_root=marco_root,

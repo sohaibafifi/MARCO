@@ -4,10 +4,14 @@ set -euo pipefail
 # Optional cluster bootstrap.
 if [[ -f "/nfs/opt/env/env.sh" ]]; then
   # shellcheck disable=SC1091
+  set +u
   . /nfs/opt/env/env.sh
+  set -u
 fi
-if command -v module >/dev/null 2>&1; then
+if command -v module >/dev/null 2>&1 && [[ -n "${MODULESHOME:-}" ]]; then
+  set +u
   module load conda >/dev/null 2>&1 || true
+  set -u
 fi
 if command -v conda >/dev/null 2>&1; then
   conda activate csp >/dev/null 2>&1 || true
@@ -41,6 +45,11 @@ RUN_VERBOSE="${RUN_VERBOSE:-0}"
 THREADS="${THREADS:-1}"
 MUSER_BIN="${MUSER_BIN:-}"
 FORCE_MINISAT="${FORCE_MINISAT:-0}"
+NO_FEEDBACK="${NO_FEEDBACK:-0}"
+CORE_HANDOFF="${CORE_HANDOFF:--1}"
+CORE_BASE_RATIO="${CORE_BASE_RATIO:-2}"
+CORE_BACKOFF_CAP="${CORE_BACKOFF_CAP:-8}"
+CORE_NO_CERTIFY="${CORE_NO_CERTIFY:-0}"
 
 UV_BIN="${UV_BIN:-}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
@@ -117,6 +126,20 @@ case "${FORCE_MINISAT}" in
     exit 1
     ;;
 esac
+case "${NO_FEEDBACK}" in
+  0|1) ;;
+  *)
+    echo "NO_FEEDBACK must be 0 or 1 (got ${NO_FEEDBACK})"
+    exit 1
+    ;;
+esac
+case "${CORE_NO_CERTIFY}" in
+  0|1) ;;
+  *)
+    echo "CORE_NO_CERTIFY must be 0 or 1 (got ${CORE_NO_CERTIFY})"
+    exit 1
+    ;;
+esac
 
 BASELINE="${method}"
 
@@ -174,6 +197,9 @@ CMD=(
   --timeout-s "$TIMEOUT_S"
   --max-outputs "$MAX_OUTPUTS"
   --threads "$THREADS"
+  --core-handoff "$CORE_HANDOFF"
+  --core-base-ratio "$CORE_BASE_RATIO"
+  --core-backoff-cap "$CORE_BACKOFF_CAP"
   --output-csv "$CSV_OUT"
 )
 if [[ -n "${MUSER_BIN}" ]]; then
@@ -181,6 +207,12 @@ if [[ -n "${MUSER_BIN}" ]]; then
 fi
 if [[ "${FORCE_MINISAT}" == "1" ]]; then
   CMD+=(--force-minisat)
+fi
+if [[ "${NO_FEEDBACK}" == "1" ]]; then
+  CMD+=(--no-feedback)
+fi
+if [[ "${CORE_NO_CERTIFY}" == "1" ]]; then
+  CMD+=(--core-no-certify)
 fi
 if [[ "${RUN_VALIDATE}" == "1" ]]; then
   CMD+=(--validate)
@@ -195,6 +227,7 @@ fi
 echo "[task] id=${TASK_LABEL} method=${method} rep=${rep_id}"
 echo "[task] instance=${instance_rel}"
 echo "[task] threads=${THREADS} force_minisat=${FORCE_MINISAT}"
+echo "[task] no_feedback=${NO_FEEDBACK} core_handoff=${CORE_HANDOFF} core_ratio=${CORE_BASE_RATIO} core_backoff=${CORE_BACKOFF_CAP} core_no_certify=${CORE_NO_CERTIFY}"
 if [[ -n "${MUSER_BIN}" ]]; then
   echo "[task] muser_bin=${MUSER_BIN}"
 fi

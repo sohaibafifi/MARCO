@@ -2,6 +2,7 @@ import os
 import queue
 import threading
 from collections import deque
+from typing import List, Optional, Set
 
 
 class MarcoPolo(object):
@@ -29,14 +30,85 @@ class MarcoPolo(object):
         self.feedback_unsat_clause_max = int(self.config.get('feedback_unsat_clause_max', 12))
         self.feedback_max_clauses = int(self.config.get('feedback_max_clauses', 2000))
         self.feedback_clause_count = 0
-        self._feedback_sat_sets = set()
-        self._feedback_unsat_sets = set()
+        # Antichain maintenance:
+        # - keep maximal SAT sets (strongest block_down clauses)
+        # - keep minimal UNSAT sets (strongest block_up clauses)
+        self._feedback_sat_maximal: List[Set[int]] = []
+        self._feedback_unsat_minimal: List[Set[int]] = []
+        self._feedback_sat_keys = set()
+        self._feedback_unsat_keys = set()
+
+        # Core-guided smart shrinking.
+        self.smart_core = bool(self.config.get('smart_core', False))
+        self.core_handoff = int(self.config.get('core_handoff', -1))
+        if self.core_handoff <= 0:
+            self.core_handoff = max(8, self.n // 3)
+        self.core_handoff = max(1, self.core_handoff)
+        self.core_base_ratio = max(1, int(self.config.get('core_base_ratio', 2)))
+        self.core_backoff_cap = max(0, int(self.config.get('core_backoff_cap', 8)))
+        self.core_certify = bool(self.config.get('core_certify', True))
+        self.core_isect: Optional[Set[int]] = None
+        self.known_muses: List[Set[int]] = []
+        self.known_mus_keys = set()
+        self._deletion_order = self._build_deletion_order()
 
         self.pipe = pipe
         # if a pipe is provided, use it to receive results from other enumerators
         if self.pipe:
             self.recv_thread = threading.Thread(target=self.receive_thread)
             self.recv_thread.start()
+
+    def _build_deletion_order(self):
+        """
+        Constraint removal order heuristic (high impact first).
+
+        If DIMACS group information is available, score each soft constraint by the
+        total number of literals in its group clauses. Otherwise all scores are 0.
+        """
+        order = {i: 0 for i in range(1, self.n + 1)}
+        groups = getattr(self.subs, "groups", None)
+        dimacs = getattr(self.subs, "dimacs", None)
+        if not groups or not dimacs:
+            return order
+
+        clause_lits = {}
+        for ci, raw in enumerate(dimacs):
+            try:
+                tokens = raw.strip().split()
+                lits = 0
+                for tok in tokens:
+                    val = int(tok)
+                    if val != 0:
+                        lits += 1
+                clause_lits[ci] = lits
+            except Exception:
+                clause_lits[ci] = 0
+
+        for idx in range(1, self.n + 1):
+            group_clause_ids = groups.get(idx, [])
+            score = 0
+            for cid in group_clause_ids:
+                score += clause_lits.get(cid, 0)
+            order[idx] = -score
+        return order
+
+    def _record_known_mus(self, mus_set):
+        key = frozenset(mus_set)
+        if key in self.known_mus_keys:
+            return
+        self.known_mus_keys.add(key)
+        self.known_muses.append(set(mus_set))
+
+    def _update_core_intersection(self, seed_set, core_set):
+        if not core_set:
+            return
+        core = set(core_set) & set(seed_set)
+        if not core:
+            return
+        if self.core_isect is None:
+            self.core_isect = set(core)
+        else:
+            self.core_isect &= core
 
     def _feedback_budget_exhausted(self):
         if not self.feedback_enabled:
@@ -50,27 +122,248 @@ class MarcoPolo(object):
         if known_max or self._feedback_budget_exhausted():
             return
 
-        seedset = frozenset(seed)
+        seedset = set(seed)
+        key = frozenset(seedset)
         if seed_is_sat:
-            clause_len = self.n - len(seed)
+            clause_len = self.n - len(seedset)
             if self.feedback_sat_clause_max >= 0 and clause_len > self.feedback_sat_clause_max:
                 return
-            if seedset in self._feedback_sat_sets:
+            if key in self._feedback_sat_keys:
                 return
-            self.map.block_down(seed)
-            self._feedback_sat_sets.add(seedset)
+            # Existing maximal SAT superset already implies this clause.
+            if any(seedset <= old for old in self._feedback_sat_maximal):
+                self.stats.increment_counter("feedback.sat.redundant")
+                return
+
+            # Drop dominated strict subsets.
+            kept = []
+            for old in self._feedback_sat_maximal:
+                if old < seedset:
+                    self._feedback_sat_keys.discard(frozenset(old))
+                    self.stats.increment_counter("feedback.sat.prune")
+                else:
+                    kept.append(old)
+            self._feedback_sat_maximal = kept
+
+            self.map.block_down(seedset)
+            self._feedback_sat_maximal.append(seedset)
+            self._feedback_sat_keys.add(key)
             self.feedback_clause_count += 1
             self.stats.increment_counter("feedback.sat")
         else:
-            clause_len = len(seed)
+            clause_len = len(seedset)
             if self.feedback_unsat_clause_max >= 0 and clause_len > self.feedback_unsat_clause_max:
                 return
-            if seedset in self._feedback_unsat_sets:
+            if key in self._feedback_unsat_keys:
                 return
-            self.map.block_up(seed)
-            self._feedback_unsat_sets.add(seedset)
+            # Existing minimal UNSAT subset already implies this clause.
+            if any(old <= seedset for old in self._feedback_unsat_minimal):
+                self.stats.increment_counter("feedback.unsat.redundant")
+                return
+
+            # Drop dominated strict supersets.
+            kept = []
+            for old in self._feedback_unsat_minimal:
+                if seedset < old:
+                    self._feedback_unsat_keys.discard(frozenset(old))
+                    self.stats.increment_counter("feedback.unsat.prune")
+                else:
+                    kept.append(old)
+            self._feedback_unsat_minimal = kept
+
+            self.map.block_up(seedset)
+            self._feedback_unsat_minimal.append(seedset)
+            self._feedback_unsat_keys.add(key)
             self.feedback_clause_count += 1
             self.stats.increment_counter("feedback.unsat")
+
+    def _probe_subset(self, subset, learn_feedback=False):
+        """
+        Probe a subset and request solver-side seed improvement (sat-subset / unsat-core).
+        """
+        probe = sorted(set(subset))
+        with self.stats.time('smart.check'):
+            is_sat, improved = self.subs.check_subset(probe, improve_seed=True)
+
+        if improved is None:
+            improved_set = set(probe)
+        else:
+            improved_set = set(int(x) for x in improved)
+            if not improved_set and probe:
+                improved_set = set(probe)
+
+        if learn_feedback:
+            self._learn_feedback(is_sat, improved_set if improved_set else probe, known_max=False)
+        return is_sat, improved_set
+
+    def _split_batch(self, batch):
+        if len(batch) <= 1:
+            return []
+        ordered = sorted(batch, key=lambda i: self._deletion_order.get(i, 0))
+        split = len(ordered) // 2
+        left = set(ordered[:split])
+        right = set(ordered[split:])
+        out = []
+        if left:
+            out.append(left)
+        if right:
+            out.append(right)
+        return out
+
+    def _shrink_to_mus_deletion(self, seed_set, initial_core=None, locked=None):
+        if initial_core:
+            mus_set = set(initial_core) & set(seed_set)
+            if not mus_set:
+                mus_set = set(seed_set)
+        else:
+            mus_set = set(seed_set)
+
+        locked_set = set(locked) if locked else set()
+        ordered = sorted(mus_set, key=lambda i: self._deletion_order.get(i, 0))
+
+        for idx in ordered:
+            if idx not in mus_set or idx in locked_set:
+                continue
+
+            mus_set.remove(idx)
+            if not mus_set:
+                mus_set.add(idx)
+                continue
+
+            is_sat, improved = self._probe_subset(mus_set, learn_feedback=False)
+            if is_sat:
+                mus_set.add(idx)
+            else:
+                refined = set(improved) & mus_set if improved else set()
+                if refined:
+                    mus_set = refined
+                    locked_set &= mus_set
+
+        return mus_set
+
+    def _preshrink_seed(self, seed_set, seed_core):
+        projected = set(seed_set)
+        for known_mus in sorted(self.known_muses, key=len):
+            if known_mus <= seed_set:
+                projected = set(known_mus)
+                if seed_core:
+                    projected |= (set(seed_core) & set(seed_set))
+                break
+        return projected
+
+    def _shrink_to_mus_bicore_qx(self, seed_set, seed_core):
+        projected_seed = self._preshrink_seed(seed_set, seed_core)
+
+        if seed_core:
+            current = set(seed_core) & projected_seed
+            if not current:
+                current = set(projected_seed)
+        else:
+            current = set(projected_seed)
+
+        if not current:
+            current = set(seed_set)
+
+        locked = set(self.core_isect & current) if self.core_isect else set()
+        batch_queue = []
+        consecutive_sat = 0
+
+        while True:
+            unlocked = [i for i in current if i not in locked]
+            if len(unlocked) <= self.core_handoff:
+                break
+
+            batch = None
+            while batch_queue and batch is None:
+                queued = batch_queue.pop()
+                queued = {i for i in queued if i in current and i not in locked}
+                if queued:
+                    batch = queued
+
+            if batch is None:
+                available = sorted(unlocked, key=lambda i: self._deletion_order.get(i, 0))
+                if not available:
+                    break
+                exp = min(consecutive_sat, self.core_backoff_cap)
+                divisor = min(self.core_base_ratio * (2 ** exp), len(available))
+                batch_size = max(1, len(available) // divisor)
+                batch = set(available[:batch_size])
+
+            test_set = set(current) - set(batch)
+            if not test_set:
+                if len(batch) == 1:
+                    locked |= set(batch)
+                else:
+                    batch_queue.extend(self._split_batch(batch))
+                continue
+
+            is_sat, improved = self._probe_subset(test_set, learn_feedback=False)
+
+            if not is_sat:
+                consecutive_sat = 0
+                refined = {i for i in improved if i in test_set} if improved else set()
+                current = refined if refined else set(test_set)
+                locked &= current
+                continue
+
+            consecutive_sat += 1
+            if len(batch) == 1:
+                locked |= set(batch)
+            else:
+                batch_queue.extend(self._split_batch(batch))
+
+        residual = sorted(current, key=lambda i: self._deletion_order.get(i, 0))
+        if not residual:
+            return set()
+
+        locked_residual = [i for i in residual if i in locked]
+        unlocked_residual = [i for i in residual if i not in locked]
+
+        def qx_unsat(enabled):
+            is_sat, _ = self._probe_subset(enabled, learn_feedback=False)
+            return not is_sat
+
+        def qx_recursive(soft_part, hard_part, delta):
+            if delta and qx_unsat(hard_part):
+                return []
+            if len(soft_part) == 1:
+                return list(soft_part)
+
+            split = len(soft_part) // 2
+            left = soft_part[:split]
+            right = soft_part[split:]
+
+            delta2 = qx_recursive(right, hard_part + left, left)
+            delta1 = qx_recursive(left, hard_part + delta2, delta2)
+            return delta1 + delta2
+
+        if unlocked_residual:
+            qx_part = qx_recursive(unlocked_residual, list(locked_residual), [])
+            mus_set = set(locked_residual) | set(qx_part)
+        else:
+            mus_set = set(locked_residual)
+
+        return self._shrink_to_mus_deletion(mus_set)
+
+    def _shrink_smart(self, seed_from_map, seed_core):
+        seed_set = set(seed_from_map)
+        if not seed_set:
+            return set()
+
+        core_set = set(seed_core) & seed_set if seed_core else None
+        self._update_core_intersection(seed_set, core_set)
+        mus_set = self._shrink_to_mus_bicore_qx(seed_set, core_set)
+
+        if self.core_certify:
+            with self.stats.time('smart.certify'):
+                certified = self.subs.shrink(sorted(mus_set))
+            if certified is None:
+                self.stats.increment_counter("smart.certify.rejected")
+                return None
+            mus_set = set(certified)
+
+        self._record_known_mus(mus_set)
+        return mus_set
 
     def _set_bias(self, mus_bias):
         if self.bias_high == mus_bias:
@@ -132,6 +425,8 @@ class MarcoPolo(object):
         '''MUS/MCS enumeration with all the bells and whistles...'''
 
         for seed, known_max in self.seeds:
+            seed = sorted(set(seed))
+            seed_from_map = list(seed)
 
             if self.config['verbose']:
                 print("- Initial seed: %s" % " ".join([str(x) for x in seed]))
@@ -140,6 +435,7 @@ class MarcoPolo(object):
                 # subset check may improve upon seed w/ unsat_core or sat_subset
                 oldlen = len(seed)
                 seed_is_sat, seed = self.subs.check_subset(seed, improve_seed=True)
+                seed = sorted(set(seed))
                 self.record_delta('checkA', oldlen, len(seed), seed_is_sat)
                 known_max = (known_max and (seed_is_sat == self.bias_high))
                 self._learn_feedback(seed_is_sat, seed, known_max)
@@ -180,19 +476,27 @@ class MarcoPolo(object):
 
             else:  # seed is not SAT
                 self.got_top = True  # any unsat set covers the top of the lattice
+                core_seed = set(seed)
                 if known_max:
-                    MUS = seed
+                    MUS = sorted(set(seed))
+                    if self.smart_core:
+                        self._update_core_intersection(seed_from_map, core_seed)
+                        self._record_known_mus(set(MUS))
                 else:
                     with self.stats.time('shrink'):
                         oldlen = len(seed)
 
-                        MUS = self.subs.shrink(seed)
+                        if self.smart_core:
+                            MUS = self._shrink_smart(seed_from_map, core_seed)
+                        else:
+                            MUS = self.subs.shrink(seed)
 
                         if MUS is None:
                             # seed was explored in another process
                             # in the meantime
                             self.stats.increment_counter("parallel_rejected")
                             continue
+                        MUS = sorted(set(MUS))
 
                         self.record_delta('shrink', oldlen, len(MUS), False)
 
@@ -209,6 +513,9 @@ class MarcoPolo(object):
                         pass
 
                     self.map.block_up(MUS)
+                    if self.smart_core and core_seed and set(MUS) != core_seed:
+                        self.map.block_up(core_seed)
+                        self.stats.increment_counter("smart.block.core")
                     self._record_result(res[0])
 
                 if self.config['verbose']:
