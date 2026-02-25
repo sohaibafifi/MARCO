@@ -146,6 +146,18 @@ def parse_args(args_list=None):
                            help="in portfolio mode, enable smart-core after this many MUS outputs (default: 1).")
     exp_group.add_argument('--portfolio-smart-after-outputs', type=int, default=0,
                            help="in portfolio mode, also require this many total outputs before enabling smart-core (default: 0).")
+    exp_group.add_argument('--sat-map-assist', action='store_true',
+                           help="for SAT seeds, pre-expand with map.maximize_seed() before grow().")
+    exp_group.add_argument('--sat-map-assist-min-gap', type=int, default=32,
+                           help="enable SAT map-assist only when (n - |seed|) >= this value (default: 32).")
+    exp_group.add_argument('--hybrid-shrink', action='store_true',
+                           help="use ImprovedImplies shrink by default, with adaptive MUSer2 handoff on hard UNSAT seeds.")
+    exp_group.add_argument('--hybrid-shrink-handoff-size', type=int, default=256,
+                           help="handoff to MUSer2 when current UNSAT core size reaches this threshold (default: 256).")
+    exp_group.add_argument('--hybrid-shrink-handoff-floor', type=int, default=64,
+                           help="minimum core size for stagnation-triggered handoff (default: 64).")
+    exp_group.add_argument('--hybrid-shrink-stagnation', type=int, default=64,
+                           help="consecutive failed deletions before MUSer2 handoff (default: 64).")
     comms_group = exp_group.add_mutually_exclusive_group()
     comms_group.add_argument('--comms-disable', action='store_true',
                              help="disable the communications between children (i.e., when the master receives a result from a child, it won't send to other children).")
@@ -199,6 +211,14 @@ def check_args(args):
         error_exit("Invalid portfolio option.", "--portfolio-smart-after-mus must be >= 0.")
     if args.portfolio_smart_after_outputs < 0:
         error_exit("Invalid portfolio option.", "--portfolio-smart-after-outputs must be >= 0.")
+    if args.sat_map_assist_min_gap < 0:
+        error_exit("Invalid SAT map-assist option.", "--sat-map-assist-min-gap must be >= 0.")
+    if args.hybrid_shrink_handoff_size < 1:
+        error_exit("Invalid hybrid-shrink option.", "--hybrid-shrink-handoff-size must be >= 1.")
+    if args.hybrid_shrink_handoff_floor < 1:
+        error_exit("Invalid hybrid-shrink option.", "--hybrid-shrink-handoff-floor must be >= 1.")
+    if args.hybrid_shrink_stagnation < 1:
+        error_exit("Invalid hybrid-shrink option.", "--hybrid-shrink-stagnation must be >= 1.")
 
 
 def at_exit(stats):
@@ -318,6 +338,8 @@ def setup_csolver(args, seed, n_only=False):
     if args.cnf or filename.endswith(('.cnf', '.cnf.gz', '.gcnf', '.gcnf.gz')):
         if args.force_minisat or args.mcs_only:  # mcs_only doesn't care about fancy features, give it a plain MinisatSubsetSolver
             solverclass = CNFsolvers.MinisatSubsetSolver
+        elif args.hybrid_shrink:
+            solverclass = CNFsolvers.HybridImprovedSubsetSolver
         elif args.improved_implies:
             solverclass = CNFsolvers.ImprovedImpliesSubsetSolver
         else:
@@ -327,8 +349,13 @@ def setup_csolver(args, seed, n_only=False):
             extra_args = {}
             if args.mcs_only:
                 extra_args['store_dimacs'] = True
-            if args.muser_bin:
+            # Only MUSer-capable CNF solvers accept muser_path.
+            if args.muser_bin and solverclass in (CNFsolvers.MUSerSubsetSolver, CNFsolvers.HybridImprovedSubsetSolver):
                 extra_args['muser_path'] = args.muser_bin
+            if solverclass is CNFsolvers.HybridImprovedSubsetSolver:
+                extra_args['handoff_size'] = args.hybrid_shrink_handoff_size
+                extra_args['handoff_floor'] = args.hybrid_shrink_handoff_floor
+                extra_args['handoff_stagnation'] = args.hybrid_shrink_stagnation
             csolver = solverclass(filename, seed, n_only, **extra_args)
         except utils.ExecutableException as e:
             error_exit("Unable to use MUSer2 for MUS extraction.", "Use --force-minisat to use Minisat instead (NOTE: it will be much slower.)", e)
@@ -405,6 +432,8 @@ def get_config(args):
     config['portfolio'] = args.portfolio
     config['portfolio_smart_after_mus'] = args.portfolio_smart_after_mus
     config['portfolio_smart_after_outputs'] = args.portfolio_smart_after_outputs
+    config['sat_map_assist'] = args.sat_map_assist
+    config['sat_map_assist_min_gap'] = args.sat_map_assist_min_gap
 
     return config
 
@@ -451,6 +480,21 @@ def run_enumerator(stats, args, pipe, seed=None):
 def run_master(stats, args, pipes):
     csolver = setup_csolver(args, seed=None, n_only=True)  # just parse enough to get n (#constraints)
     is_parallel = len(pipes) > 1
+    child_stats_idx = 0
+
+    def merge_child_stats(child_stats):
+        nonlocal child_stats_idx
+        child_stats_idx += 1
+        prefix = "worker%d." % child_stats_idx
+        # Aggregate worker profiling into master stats with explicit prefix.
+        for category, value in child_stats.get_times().items():
+            if category == 'total':
+                continue
+            stats._times[prefix + category] += value
+        for category, value in child_stats.get_counts().items():
+            stats._counts[prefix + category] += value
+        for name, values in child_stats.get_stats().items():
+            stats._stats[prefix + name].extend(values)
 
     if is_parallel:
         # for filtering duplicate results (found near-simultaneously by 2+ children)
@@ -477,6 +521,8 @@ def run_master(stats, args, pipes):
                         break
 
                     if result[0] == 'done':
+                        if args.stats and len(result) > 1:
+                            merge_child_stats(result[1])
                         # "done" indicates the child process has finished its work,
                         # but enumeration may not be complete (if the child was only
                         # enumerating MCSes, e.g.)
@@ -488,6 +534,8 @@ def run_master(stats, args, pipes):
                         pipes.remove(receiver)
 
                     elif result[0] == 'complete':
+                        if args.stats and len(result) > 1:
+                            merge_child_stats(result[1])
                         # "complete" indicates the child process has completed enumeration,
                         # with everything blocked.  Everything can be stopped at this point.
                         if args.verbose > 1:

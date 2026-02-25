@@ -330,3 +330,149 @@ class ImprovedImpliesSubsetSolver(MinisatSubsetSolver):
                     dont_add = set(x for x in implications if x < 0)
 
         return current
+
+
+class HybridImprovedSubsetSolver(ImprovedImpliesSubsetSolver):
+    """
+    Improved-Implies solver with adaptive shrink handoff to MUSer2.
+
+    Strategy:
+    - Start with cheap ImprovedImplies deletion shrink.
+    - If the UNSAT core remains large, or deletion attempts stagnate,
+      hand off to MUSer2 for stronger core extraction.
+    """
+
+    def __init__(
+        self,
+        filename,
+        rand_seed=None,
+        n_only=False,
+        store_dimacs=True,
+        muser_path=None,
+        handoff_size=256,
+        handoff_floor=64,
+        handoff_stagnation=64,
+    ):
+        # Force DIMACS/group storage for MUSer gcnf export.
+        ImprovedImpliesSubsetSolver.__init__(self, filename, rand_seed, n_only, store_dimacs=True)
+        self.core_pattern = re.compile(r'^v [\d ]+$', re.MULTILINE)
+
+        if muser_path is None:
+            muser_path = os.environ.get('MUSER2_PATH')
+        if muser_path is None:
+            binary = 'muser2-para'
+            muser_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), binary)
+        self.muser_path = muser_path
+        utils.check_executable("MUSer2", self.muser_path)
+
+        self.handoff_size = max(1, int(handoff_size))
+        self.handoff_floor = max(1, int(handoff_floor))
+        self.handoff_stagnation = max(1, int(handoff_stagnation))
+
+        self._proc = None
+        atexit.register(self.cleanup)
+
+    # kill MUSer process if still running when we exit (e.g. due to a timeout)
+    def cleanup(self):
+        if self._proc:
+            self._proc.kill()
+
+    # write CNF output for MUSer2
+    def write_CNF(self, cnffile, seed, hard):
+        header = "p gcnf %d %d %d\n" % (self.nvars, len(seed), len(seed))
+        cnffile.write(header.encode())
+
+        # existing "Don't care" group
+        for j in self.groups[0]:
+            cnffile.write(b"{0} ")
+            cnffile.write(self.dimacs[j])
+        # include hard clauses in group 0
+        for i in hard:
+            for j in self.groups[i]:
+                cnffile.write(b"{0} ")
+                cnffile.write(self.dimacs[j])
+
+        for g, i in enumerate(seed):
+            if i in hard:
+                continue
+            for j in self.groups[i]:
+                cnffile.write(("{%d} " % (g + 1)).encode())
+                cnffile.write(self.dimacs[j])
+
+        cnffile.flush()
+
+    def _muser_shrink(self, seed):
+        # In parallel mode the seed may become explored meanwhile.
+        if not self._msolver.check_seed(seed):
+            return None
+
+        hard = set(x for x in self._msolver.implies() if x > 0)
+        if len(seed) == len(hard):
+            return seed
+
+        with tempfile.NamedTemporaryFile('wb') as cnf:
+            self.write_CNF(cnf, seed, hard)
+            args = [self.muser_path, '-comp', '-grp', '-v', '-1', cnf.name]
+            self._proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            out, _err = self._proc.communicate()
+            del self._proc
+            out = out.decode()
+
+        match = re.search(self.core_pattern, out)
+        if not match:
+            return None
+
+        matchline = match.group(0)
+        ret = [seed[int(x) - 1] for x in matchline.split()[1:-1] if int(x) > 0]
+        ret.extend(hard)
+        assert len(ret) <= len(seed)
+        return ret
+
+    def shrink(self, seed):
+        current = set(seed)
+
+        if self._known_MSS > 0:
+            implications = self._msolver.implies(-x for x in self.complement(current))
+            hard = set(x for x in implications if x > 0)
+        else:
+            hard = set()
+
+        stagnation = 0
+        tried_muser = False
+
+        for i in seed:
+            if i not in current or i in hard:
+                continue
+            current.remove(i)
+
+            if self.check_subset(current):
+                current.add(i)
+                stagnation += 1
+                if (
+                    (not tried_muser)
+                    and len(current) >= self.handoff_floor
+                    and stagnation >= self.handoff_stagnation
+                ):
+                    muser_core = self._muser_shrink(sorted(current))
+                    tried_muser = True
+                    if muser_core is not None:
+                        return set(muser_core)
+            else:
+                current = set(self.s.unsat_core(offset=1))
+                stagnation = 0
+                if self._known_MSS > 0:
+                    implications = self._msolver.implies(-x for x in self.complement(current))
+                    hard = set(x for x in implications if x > 0)
+
+                if (not tried_muser) and len(current) >= self.handoff_size:
+                    muser_core = self._muser_shrink(sorted(current))
+                    tried_muser = True
+                    if muser_core is not None:
+                        return set(muser_core)
+
+        if (not tried_muser) and len(current) >= self.handoff_size:
+            muser_core = self._muser_shrink(sorted(current))
+            if muser_core is not None:
+                return set(muser_core)
+
+        return current

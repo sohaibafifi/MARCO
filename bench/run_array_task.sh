@@ -41,6 +41,7 @@ MAX_OUTPUTS="${MAX_OUTPUTS:-0}"
 RUN_VALIDATE="${RUN_VALIDATE:-0}"
 RUN_VERIFY_UNSAT="${RUN_VERIFY_UNSAT:-0}"
 RUN_VERBOSE="${RUN_VERBOSE:-0}"
+RUN_PROFILE_STATS="${RUN_PROFILE_STATS:-0}"
 
 THREADS="${THREADS:-1}"
 MUSER_BIN="${MUSER_BIN:-}"
@@ -52,6 +53,13 @@ CORE_BACKOFF_CAP="${CORE_BACKOFF_CAP:-8}"
 CORE_NO_CERTIFY="${CORE_NO_CERTIFY:-0}"
 PORTFOLIO_SMART_AFTER_MUS="${PORTFOLIO_SMART_AFTER_MUS:-1}"
 PORTFOLIO_SMART_AFTER_OUTPUTS="${PORTFOLIO_SMART_AFTER_OUTPUTS:-0}"
+SAT_MAP_ASSIST_MIN_GAP="${SAT_MAP_ASSIST_MIN_GAP:-32}"
+HYBRID_SHRINK_HANDOFF_SIZE="${HYBRID_SHRINK_HANDOFF_SIZE:-256}"
+HYBRID_SHRINK_HANDOFF_FLOOR="${HYBRID_SHRINK_HANDOFF_FLOOR:-64}"
+HYBRID_SHRINK_STAGNATION="${HYBRID_SHRINK_STAGNATION:-64}"
+DUALHS_SOLVER="${DUALHS_SOLVER:-implies}"
+DUALHS_MAP_MASTER="${DUALHS_MAP_MASTER:-auto}"
+DUALHS_MUS_QUOTA_EVERY="${DUALHS_MUS_QUOTA_EVERY:-0}"
 
 UV_BIN="${UV_BIN:-}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
@@ -204,6 +212,13 @@ CMD=(
   --core-backoff-cap "$CORE_BACKOFF_CAP"
   --portfolio-smart-after-mus "$PORTFOLIO_SMART_AFTER_MUS"
   --portfolio-smart-after-outputs "$PORTFOLIO_SMART_AFTER_OUTPUTS"
+  --sat-map-assist-min-gap "$SAT_MAP_ASSIST_MIN_GAP"
+  --hybrid-shrink-handoff-size "$HYBRID_SHRINK_HANDOFF_SIZE"
+  --hybrid-shrink-handoff-floor "$HYBRID_SHRINK_HANDOFF_FLOOR"
+  --hybrid-shrink-stagnation "$HYBRID_SHRINK_STAGNATION"
+  --dualhs-solver "$DUALHS_SOLVER"
+  --dualhs-map-master "$DUALHS_MAP_MASTER"
+  --dualhs-mus-quota-every "$DUALHS_MUS_QUOTA_EVERY"
   --output-csv "$CSV_OUT"
 )
 if [[ -n "${MUSER_BIN}" ]]; then
@@ -227,11 +242,18 @@ fi
 if [[ "${RUN_VERBOSE}" == "1" ]]; then
   CMD+=(--verbose)
 fi
+if [[ "${RUN_PROFILE_STATS}" == "1" ]]; then
+  CMD+=(--profile-stats)
+fi
 
 echo "[task] id=${TASK_LABEL} method=${method} rep=${rep_id}"
 echo "[task] instance=${instance_rel}"
 echo "[task] threads=${THREADS} force_minisat=${FORCE_MINISAT}"
 echo "[task] no_feedback=${NO_FEEDBACK} core_handoff=${CORE_HANDOFF} core_ratio=${CORE_BASE_RATIO} core_backoff=${CORE_BACKOFF_CAP} core_no_certify=${CORE_NO_CERTIFY} portfolio_mus=${PORTFOLIO_SMART_AFTER_MUS} portfolio_out=${PORTFOLIO_SMART_AFTER_OUTPUTS}"
+echo "[task] sat_map_assist_min_gap=${SAT_MAP_ASSIST_MIN_GAP}"
+echo "[task] hybrid_handoff_size=${HYBRID_SHRINK_HANDOFF_SIZE} hybrid_handoff_floor=${HYBRID_SHRINK_HANDOFF_FLOOR} hybrid_stagnation=${HYBRID_SHRINK_STAGNATION}"
+echo "[task] dualhs_solver=${DUALHS_SOLVER} dualhs_map_master=${DUALHS_MAP_MASTER} dualhs_mus_quota_every=${DUALHS_MUS_QUOTA_EVERY}"
+echo "[task] profile_stats=${RUN_PROFILE_STATS}"
 if [[ -n "${MUSER_BIN}" ]]; then
   echo "[task] muser_bin=${MUSER_BIN}"
 fi

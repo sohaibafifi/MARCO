@@ -6,6 +6,8 @@ Compares:
 - MARCO baseline from MARCO `marco.py`
 - MARCO basic variant (`marco.py --nomax`)
 - MARCO+ style variant (`marco.py --improved-implies`)
+- DualHS prototype (`dual_hs.py`, non-MARCO)
+- Hybrid map-assisted variant (`marco_hybrid.py`)
 - Adaptive variant from MARCO `marco_adaptive.py`
 - Smart adaptive/core variant from MARCO `marco_smart.py`
 - Portfolio variant from MARCO `marco_portfolio.py`
@@ -35,8 +37,22 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 P_HEADER = re.compile(r"^p\s+cnf\s+(\d+)\s+(\d+)\s*$")
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+WORKER_PREFIX = re.compile(r"^worker\d+\.(.+)$")
+NUMBER_ONLY = re.compile(r"^[+-]?\d+(?:\.\d+)?$")
 SCRIPT_DIR = Path(__file__).resolve().parent
 MARCO_ROOT_DEFAULT = SCRIPT_DIR.parent
+PHASE_KEYS = (
+    "setup",
+    "seed",
+    "check",
+    "shrink",
+    "grow",
+    "block",
+    "hubcomms",
+    "msolver",
+    "msolver_block",
+    "total",
+)
 
 
 def default_dataset_root() -> Path:
@@ -89,6 +105,16 @@ class RunRecord:
     mcs_signature: str
     signature_ready: bool
     error: str
+    phase_setup_s: Optional[float]
+    phase_seed_s: Optional[float]
+    phase_check_s: Optional[float]
+    phase_shrink_s: Optional[float]
+    phase_grow_s: Optional[float]
+    phase_block_s: Optional[float]
+    phase_hubcomms_s: Optional[float]
+    phase_msolver_s: Optional[float]
+    phase_msolver_block_s: Optional[float]
+    phase_total_s: Optional[float]
 
 
 @dataclass
@@ -98,6 +124,7 @@ class MethodSummary:
     completed_rate: float
     timeout_rate: float
     valid_rate: float
+    mean_ms: Optional[float]
     median_ms: Optional[float]
     p90_ms: Optional[float]
     median_outputs: Optional[float]
@@ -120,6 +147,35 @@ def parse_csv_list(raw: str) -> List[str]:
 
 def strip_ansi(text: str) -> str:
     return ANSI_ESCAPE.sub("", text or "")
+
+
+def parse_stats_times(stderr_text: str) -> Dict[str, Optional[float]]:
+    phase_vals: Dict[str, float] = {k: 0.0 for k in PHASE_KEYS}
+    seen = set()
+
+    for raw in (stderr_text or "").splitlines():
+        line = strip_ansi(raw).strip()
+        if ":" not in line:
+            continue
+
+        name, val = line.split(":", 1)
+        name = name.strip()
+        val = val.strip()
+        if not NUMBER_ONLY.fullmatch(val):
+            continue
+
+        if any(name.endswith(suffix) for suffix in (" count", " per", " min", " max", " avg")):
+            continue
+
+        m = WORKER_PREFIX.match(name)
+        if m:
+            name = m.group(1)
+
+        if name in phase_vals:
+            phase_vals[name] += float(val)
+            seen.add(name)
+
+    return {k: (phase_vals[k] if k in seen else None) for k in PHASE_KEYS}
 
 
 def read_dimacs_header(path: Path) -> Tuple[Optional[int], Optional[int]]:
@@ -311,6 +367,14 @@ def run_once(
     core_no_certify: bool,
     portfolio_smart_after_mus: int,
     portfolio_smart_after_outputs: int,
+    sat_map_assist_min_gap: int,
+    hybrid_shrink_handoff_size: int,
+    hybrid_shrink_handoff_floor: int,
+    hybrid_shrink_stagnation: int,
+    dualhs_solver: str,
+    dualhs_map_master: str,
+    dualhs_mus_quota_every: int,
+    profile_stats: bool,
     validate: bool,
     verify_unsat: bool,
     marco_root: Path,
@@ -327,6 +391,34 @@ def run_once(
     elif method_name == "marco_plus":
         script_name = "marco.py"
         method_flags = ["--improved-implies"]
+    elif method_name == "marco_hybrid":
+        script_name = "marco_hybrid.py"
+        method_flags = [
+            "--sat-map-assist-min-gap",
+            str(max(0, sat_map_assist_min_gap)),
+            "--hybrid-shrink-handoff-size",
+            str(max(1, hybrid_shrink_handoff_size)),
+            "--hybrid-shrink-handoff-floor",
+            str(max(1, hybrid_shrink_handoff_floor)),
+            "--hybrid-shrink-stagnation",
+            str(max(1, hybrid_shrink_stagnation)),
+        ]
+    elif method_name == "dual_hs":
+        script_name = "dual_hs.py"
+        method_flags = [
+            "--solver",
+            dualhs_solver,
+            "--map-master",
+            dualhs_map_master,
+            "--mus-quota-every",
+            str(max(0, dualhs_mus_quota_every)),
+            "--hybrid-shrink-handoff-size",
+            str(max(1, hybrid_shrink_handoff_size)),
+            "--hybrid-shrink-handoff-floor",
+            str(max(1, hybrid_shrink_handoff_floor)),
+            "--hybrid-shrink-stagnation",
+            str(max(1, hybrid_shrink_stagnation)),
+        ]
     elif method_name == "marco_adaptive":
         script_name = "marco_adaptive.py"
         method_flags = []
@@ -378,6 +470,8 @@ def run_once(
                 cmd += ["--muser-bin", muser_bin]
             if force_minisat:
                 cmd += ["--force-minisat"]
+            if profile_stats:
+                cmd += ["--stats"]
             if validate:
                 # Needed to obtain full result sets for cross-method signature checks.
                 cmd += ["-v"]
@@ -387,18 +481,30 @@ def run_once(
             with stdout_path.open("w", encoding="utf-8", errors="replace") as out_f, stderr_path.open(
                 "w", encoding="utf-8", errors="replace"
             ) as err_f:
-                proc = subprocess.run(
-                    cmd,
-                    cwd=str(marco_root),
-                    stdout=out_f,
-                    stderr=err_f,
-                    text=True,
-                    check=False,
-                )
+                hard_timed_out = False
+                proc_returncode: Optional[int] = None
+                # Enforce a hard wall-clock timeout in the runner. The child also
+                # receives --timeout, but that is cooperative and can be exceeded
+                # by long internal operations.
+                subprocess_timeout = (max(1.0, float(timeout_s) + 0.5) if timeout_s > 0 else None)
+                try:
+                    proc = subprocess.run(
+                        cmd,
+                        cwd=str(marco_root),
+                        stdout=out_f,
+                        stderr=err_f,
+                        text=True,
+                        check=False,
+                        timeout=subprocess_timeout,
+                    )
+                    proc_returncode = proc.returncode
+                except subprocess.TimeoutExpired:
+                    hard_timed_out = True
 
             stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
-            timed_out = "Time limit reached." in stderr_text
-            completed = (proc.returncode == 0) and (not timed_out)
+            phase_times = parse_stats_times(stderr_text) if profile_stats else {k: None for k in PHASE_KEYS}
+            timed_out = hard_timed_out or ("Time limit reached." in stderr_text)
+            completed = (proc_returncode == 0) and (not timed_out)
             success = completed
             error = ""
             if not success:
@@ -406,7 +512,7 @@ def run_once(
                     error = "timeout"
                 else:
                     lines = [ln for ln in stderr_text.splitlines() if ln.strip()]
-                    first_err = lines[0] if lines else f"exitcode={proc.returncode}"
+                    first_err = lines[0] if lines else f"exitcode={proc_returncode}"
                     error = strip_ansi(first_err).strip()
 
             (
@@ -442,6 +548,16 @@ def run_once(
                 mcs_signature=mcs_signature,
                 signature_ready=signature_ready,
                 error=error,
+                phase_setup_s=phase_times["setup"],
+                phase_seed_s=phase_times["seed"],
+                phase_check_s=phase_times["check"],
+                phase_shrink_s=phase_times["shrink"],
+                phase_grow_s=phase_times["grow"],
+                phase_block_s=phase_times["block"],
+                phase_hubcomms_s=phase_times["hubcomms"],
+                phase_msolver_s=phase_times["msolver"],
+                phase_msolver_block_s=phase_times["msolver_block"],
+                phase_total_s=phase_times["total"],
             )
     except Exception as exc:  # pragma: no cover
         elapsed = time.perf_counter() - t0
@@ -465,6 +581,16 @@ def run_once(
             mcs_signature="",
             signature_ready=False,
             error=str(exc),
+            phase_setup_s=None,
+            phase_seed_s=None,
+            phase_check_s=None,
+            phase_shrink_s=None,
+            phase_grow_s=None,
+            phase_block_s=None,
+            phase_hubcomms_s=None,
+            phase_msolver_s=None,
+            phase_msolver_block_s=None,
+            phase_total_s=None,
         )
 
 
@@ -491,6 +617,7 @@ def summarize(records: List[RunRecord]) -> List[MethodSummary]:
                 completed_rate=(len(completed_rows) / len(rows)) if rows else 0.0,
                 timeout_rate=(sum(1 for r in rows if r.timed_out) / len(rows)) if rows else 0.0,
                 valid_rate=(len(valid_rows) / len(rows)) if rows else 0.0,
+                mean_ms=((sum(elapsed_vals) / len(elapsed_vals)) * 1000.0) if elapsed_vals else None,
                 median_ms=(statistics.median(elapsed_vals) * 1000.0) if elapsed_vals else None,
                 p90_ms=(percentile(elapsed_vals, 0.90) * 1000.0) if elapsed_vals else None,
                 median_outputs=statistics.median(output_vals) if output_vals else None,
@@ -504,8 +631,9 @@ def summarize(records: List[RunRecord]) -> List[MethodSummary]:
 
 def print_method_summary(rows: List[MethodSummary], baseline: str) -> None:
     print("\nMethod summary")
-    print("method            done  timeout valid median_ms   p90_ms  med_out med_mus med_mcs first_mus_ms")
+    print("method            done  timeout valid  mean_ms median_ms   p90_ms  med_out med_mus med_mcs first_mus_ms")
     for row in rows:
+        mean_txt = f"{row.mean_ms:8.3f}" if row.mean_ms is not None else "     n/a"
         median_txt = f"{row.median_ms:9.3f}" if row.median_ms is not None else "      n/a"
         p90_txt = f"{row.p90_ms:8.3f}" if row.p90_ms is not None else "    n/a"
         out_txt = f"{row.median_outputs:.1f}" if row.median_outputs is not None else "n/a"
@@ -514,7 +642,7 @@ def print_method_summary(rows: List[MethodSummary], baseline: str) -> None:
         fm_txt = f"{row.median_first_mus_ms:.1f}" if row.median_first_mus_ms is not None else "n/a"
         print(
             f"{row.method:16} {row.completed_rate:5.2f} {row.timeout_rate:7.2f} {row.valid_rate:5.2f} "
-            f"{median_txt} {p90_txt} {out_txt:>7} {mus_txt:>7} {mcs_txt:>7} {fm_txt:>12}"
+            f"{mean_txt} {median_txt} {p90_txt} {out_txt:>7} {mus_txt:>7} {mcs_txt:>7} {fm_txt:>12}"
         )
 
     lookup = {r.method: r for r in rows}
@@ -528,6 +656,14 @@ def print_method_summary(rows: List[MethodSummary], baseline: str) -> None:
                 print(f"  {row.method:16} n/a")
                 continue
             print(f"  {row.method:16} x{base.median_ms / row.median_ms:.3f}")
+        print(f"\nSpeedup vs baseline '{baseline}' (mean completed runtime):")
+        for row in rows:
+            if row.method == baseline:
+                continue
+            if base.mean_ms is None or row.mean_ms is None or row.mean_ms <= 0:
+                print(f"  {row.method:16} n/a")
+                continue
+            print(f"  {row.method:16} x{base.mean_ms / row.mean_ms:.3f}")
 
 
 def print_failure_summary(records: List[RunRecord]) -> None:
@@ -549,6 +685,50 @@ def print_failure_summary(records: List[RunRecord]) -> None:
             by_error[key] = by_error.get(key, 0) + 1
         for err, cnt in sorted(by_error.items(), key=lambda kv: (-kv[1], kv[0]))[:3]:
             print(f"    {cnt}x {err}")
+
+
+def print_profile_summary(records: List[RunRecord]) -> None:
+    phase_getters = {
+        "seed": lambda r: r.phase_seed_s,
+        "check": lambda r: r.phase_check_s,
+        "shrink": lambda r: r.phase_shrink_s,
+        "grow": lambda r: r.phase_grow_s,
+        "block": lambda r: r.phase_block_s,
+        "hubcomms": lambda r: r.phase_hubcomms_s,
+        "msolver": lambda r: r.phase_msolver_s,
+        "msolver_block": lambda r: r.phase_msolver_block_s,
+    }
+
+    by_method: Dict[str, List[RunRecord]] = {}
+    for rec in records:
+        if not rec.success or not rec.completed:
+            continue
+        if rec.phase_total_s is None or rec.phase_total_s <= 0:
+            continue
+        by_method.setdefault(rec.method, []).append(rec)
+
+    if not by_method:
+        return
+
+    print("\nProfile summary (median phase share of total runtime)")
+    print("method            phase1      phase2      phase3")
+    for method in sorted(by_method):
+        rows = by_method[method]
+        shares: List[Tuple[str, float]] = []
+        for name, getter in phase_getters.items():
+            vals: List[float] = []
+            for rec in rows:
+                phase_val = getter(rec)
+                if phase_val is None or rec.phase_total_s is None or rec.phase_total_s <= 0:
+                    continue
+                vals.append(max(0.0, phase_val) / rec.phase_total_s)
+            if vals:
+                shares.append((name, statistics.median(vals)))
+
+        shares.sort(key=lambda x: x[1], reverse=True)
+        top = shares[:3]
+        text = " ".join(f"{name}={share*100:5.1f}%" for name, share in top)
+        print(f"{method:16} {text}")
 
 
 def apply_cross_method_validation(records: List[RunRecord], baseline: str) -> Tuple[int, int]:
@@ -623,6 +803,16 @@ def write_csv(path: Path, runs: List[RunRecord], summary_rows: List[MethodSummar
                 "mcs_signature",
                 "signature_ready",
                 "error",
+                "phase_setup_s",
+                "phase_seed_s",
+                "phase_check_s",
+                "phase_shrink_s",
+                "phase_grow_s",
+                "phase_block_s",
+                "phase_hubcomms_s",
+                "phase_msolver_s",
+                "phase_msolver_block_s",
+                "phase_total_s",
             ]
         )
         for r in runs:
@@ -647,6 +837,16 @@ def write_csv(path: Path, runs: List[RunRecord], summary_rows: List[MethodSummar
                     r.mcs_signature,
                     r.signature_ready,
                     r.error,
+                    "" if r.phase_setup_s is None else f"{r.phase_setup_s:.9f}",
+                    "" if r.phase_seed_s is None else f"{r.phase_seed_s:.9f}",
+                    "" if r.phase_check_s is None else f"{r.phase_check_s:.9f}",
+                    "" if r.phase_shrink_s is None else f"{r.phase_shrink_s:.9f}",
+                    "" if r.phase_grow_s is None else f"{r.phase_grow_s:.9f}",
+                    "" if r.phase_block_s is None else f"{r.phase_block_s:.9f}",
+                    "" if r.phase_hubcomms_s is None else f"{r.phase_hubcomms_s:.9f}",
+                    "" if r.phase_msolver_s is None else f"{r.phase_msolver_s:.9f}",
+                    "" if r.phase_msolver_block_s is None else f"{r.phase_msolver_block_s:.9f}",
+                    "" if r.phase_total_s is None else f"{r.phase_total_s:.9f}",
                 ]
             )
 
@@ -660,6 +860,7 @@ def write_csv(path: Path, runs: List[RunRecord], summary_rows: List[MethodSummar
                 "completed_rate",
                 "timeout_rate",
                 "valid_rate",
+                "mean_ms",
                 "median_ms",
                 "p90_ms",
                 "median_outputs",
@@ -676,6 +877,7 @@ def write_csv(path: Path, runs: List[RunRecord], summary_rows: List[MethodSummar
                     f"{s.completed_rate:.6f}",
                     f"{s.timeout_rate:.6f}",
                     f"{s.valid_rate:.6f}",
+                    "" if s.mean_ms is None else f"{s.mean_ms:.6f}",
                     "" if s.median_ms is None else f"{s.median_ms:.6f}",
                     "" if s.p90_ms is None else f"{s.p90_ms:.6f}",
                     "" if s.median_outputs is None else f"{s.median_outputs:.6f}",
@@ -704,7 +906,7 @@ def main() -> None:
     parser.add_argument(
         "--methods",
         default="marco,marco_adaptive,marco_smart,marco_portfolio",
-        help="Comma-separated methods: marco,marco_basic,marco_plus,marco_adaptive,marco_smart,marco_portfolio",
+        help="Comma-separated methods: marco,marco_basic,marco_plus,marco_hybrid,dual_hs,marco_adaptive,marco_smart,marco_portfolio",
     )
     parser.add_argument(
         "--instances",
@@ -758,6 +960,13 @@ def main() -> None:
     parser.add_argument("--core-no-certify", action="store_true", help="Disable marco_smart final certification")
     parser.add_argument("--portfolio-smart-after-mus", type=int, default=1, help="marco_portfolio smart-core activation MUS threshold")
     parser.add_argument("--portfolio-smart-after-outputs", type=int, default=0, help="marco_portfolio smart-core activation output threshold")
+    parser.add_argument("--sat-map-assist-min-gap", type=int, default=32, help="marco_hybrid SAT map-assist min (n-|seed|) gap")
+    parser.add_argument("--hybrid-shrink-handoff-size", type=int, default=256, help="marco_hybrid MUSer handoff size threshold")
+    parser.add_argument("--hybrid-shrink-handoff-floor", type=int, default=64, help="marco_hybrid MUSer handoff floor for stagnation")
+    parser.add_argument("--hybrid-shrink-stagnation", type=int, default=64, help="marco_hybrid failed-deletion streak before handoff")
+    parser.add_argument("--dualhs-solver", choices=["implies", "hybrid", "muser"], default="implies", help="dual_hs subset solver backend")
+    parser.add_argument("--dualhs-map-master", choices=["auto", "minisat", "minicard"], default="auto", help="dual_hs map backend")
+    parser.add_argument("--dualhs-mus-quota-every", type=int, default=0, help="dual_hs MUS quota period N (<=0 disables)")
     parser.add_argument("--no-feedback", action="store_true", help="Disable adaptive/smart feedback clauses")
     parser.add_argument(
         "--baseline",
@@ -766,6 +975,11 @@ def main() -> None:
     )
     parser.add_argument("--output-csv", default="", help="Write run-level CSV to this path")
     parser.add_argument("--verbose", action="store_true", help="Print per-run progress")
+    parser.add_argument(
+        "--profile-stats",
+        action="store_true",
+        help="Collect MARCO --stats per run and export phase timings (seed/check/shrink/...) to CSV",
+    )
 
     # Unused options accepted for compatibility with cpmpy runner invocation.
     parser.add_argument("--solver", default="", help=argparse.SUPPRESS)
@@ -778,7 +992,7 @@ def main() -> None:
     args = parser.parse_args()
 
     methods = parse_csv_list(args.methods)
-    allowed = {"marco", "marco_basic", "marco_plus", "marco_adaptive", "marco_smart", "marco_portfolio"}
+    allowed = {"marco", "marco_basic", "marco_plus", "marco_hybrid", "dual_hs", "marco_adaptive", "marco_smart", "marco_portfolio"}
     for m in methods:
         if m not in allowed:
             raise ValueError(f"Unknown method '{m}'. Allowed: {', '.join(sorted(allowed))}")
@@ -834,9 +1048,17 @@ def main() -> None:
     print(f"  core_ratio    : {args.core_base_ratio}")
     print(f"  core_backoff  : {args.core_backoff_cap}")
     print(f"  core_certify  : {not args.core_no_certify}")
+    print(f"  sat_map_gap   : {args.sat_map_assist_min_gap}")
+    print(f"  hybrid_size   : {args.hybrid_shrink_handoff_size}")
+    print(f"  hybrid_floor  : {args.hybrid_shrink_handoff_floor}")
+    print(f"  hybrid_stag   : {args.hybrid_shrink_stagnation}")
+    print(f"  dualhs_solver : {args.dualhs_solver}")
+    print(f"  dualhs_map    : {args.dualhs_map_master}")
+    print(f"  dualhs_quota  : {args.dualhs_mus_quota_every}")
     print(f"  portfolio_mus  : {args.portfolio_smart_after_mus}")
     print(f"  portfolio_out  : {args.portfolio_smart_after_outputs}")
     print(f"  validate      : {args.validate}")
+    print(f"  profile_stats : {args.profile_stats}")
 
     run_records: List[RunRecord] = []
     total_jobs = len(selected) * len(methods) * (args.warmup + args.repeats)
@@ -868,6 +1090,14 @@ def main() -> None:
                     core_no_certify=args.core_no_certify,
                     portfolio_smart_after_mus=args.portfolio_smart_after_mus,
                     portfolio_smart_after_outputs=args.portfolio_smart_after_outputs,
+                    sat_map_assist_min_gap=args.sat_map_assist_min_gap,
+                    hybrid_shrink_handoff_size=args.hybrid_shrink_handoff_size,
+                    hybrid_shrink_handoff_floor=args.hybrid_shrink_handoff_floor,
+                    hybrid_shrink_stagnation=args.hybrid_shrink_stagnation,
+                    dualhs_solver=args.dualhs_solver,
+                    dualhs_map_master=args.dualhs_map_master,
+                    dualhs_mus_quota_every=args.dualhs_mus_quota_every,
+                    profile_stats=args.profile_stats,
                     validate=False,
                     verify_unsat=False,
                     marco_root=marco_root,
@@ -894,6 +1124,14 @@ def main() -> None:
                     core_no_certify=args.core_no_certify,
                     portfolio_smart_after_mus=args.portfolio_smart_after_mus,
                     portfolio_smart_after_outputs=args.portfolio_smart_after_outputs,
+                    sat_map_assist_min_gap=args.sat_map_assist_min_gap,
+                    hybrid_shrink_handoff_size=args.hybrid_shrink_handoff_size,
+                    hybrid_shrink_handoff_floor=args.hybrid_shrink_handoff_floor,
+                    hybrid_shrink_stagnation=args.hybrid_shrink_stagnation,
+                    dualhs_solver=args.dualhs_solver,
+                    dualhs_map_master=args.dualhs_map_master,
+                    dualhs_mus_quota_every=args.dualhs_mus_quota_every,
+                    profile_stats=args.profile_stats,
                     validate=args.validate,
                     verify_unsat=args.verify_unsat,
                     marco_root=marco_root,
@@ -917,6 +1155,8 @@ def main() -> None:
 
     summary_rows = summarize(run_records)
     print_method_summary(summary_rows, baseline=baseline)
+    if args.profile_stats:
+        print_profile_summary(run_records)
     print_failure_summary(run_records)
 
     if args.output_csv:

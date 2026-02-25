@@ -66,6 +66,10 @@ class MarcoPolo(object):
         else:
             self.smart_core_active = bool(self.smart_core_target)
 
+        # Hybrid SAT-side acceleration: map-guided pre-expansion before grow().
+        self.sat_map_assist = bool(self.config.get('sat_map_assist', False))
+        self.sat_map_assist_min_gap = max(0, int(self.config.get('sat_map_assist_min_gap', 32)))
+
         self.pipe = pipe
         # if a pipe is provided, use it to receive results from other enumerators
         if self.pipe:
@@ -420,6 +424,46 @@ class MarcoPolo(object):
             # Plenty of MUS outputs: diversify toward MCS-hunting.
             self._set_bias(False)
 
+    def _assist_sat_seed(self, seed):
+        """
+        For SAT seeds far from the top, use map-side maximization to jump closer
+        to a maximal unexplored candidate, then re-check SAT.
+        """
+        if not self.sat_map_assist:
+            return seed
+
+        seed = sorted(set(seed))
+        if (self.n - len(seed)) < self.sat_map_assist_min_gap:
+            self.stats.increment_counter("satassist.skip.small_gap")
+            return seed
+
+        with self.stats.time('satassist.mapmax'):
+            candidate = self.map.maximize_seed(seed, True)
+        candidate = sorted(set(candidate))
+
+        if len(candidate) <= len(seed):
+            self.stats.increment_counter("satassist.no_gain")
+            return seed
+
+        with self.stats.time('satassist.check'):
+            cand_sat, improved = self.subs.check_subset(candidate, improve_seed=True)
+
+        improved_seed = sorted(set(improved)) if improved is not None else candidate
+
+        if not cand_sat:
+            self.stats.increment_counter("satassist.unsat")
+            if self.feedback_enabled:
+                self._learn_feedback(False, improved_seed if improved_seed else candidate, known_max=False)
+            return seed
+
+        if len(improved_seed) < len(seed):
+            self.stats.increment_counter("satassist.regress")
+            return seed
+
+        self.record_delta('satassist', len(seed), len(improved_seed), True)
+        self.stats.increment_counter("satassist.hit")
+        return improved_seed
+
     def receive_thread(self):
         while self.pipe.poll(None):
             with self.stats.time('receive'):
@@ -467,7 +511,16 @@ class MarcoPolo(object):
                 seed = sorted(set(seed))
                 self.record_delta('checkA', oldlen, len(seed), seed_is_sat)
                 known_max = (known_max and (seed_is_sat == self.bias_high))
-                self._learn_feedback(seed_is_sat, seed, known_max)
+                # Adaptive mode changes bias online; known_max can become unsound
+                # for UNSAT seeds when bias flips. Keep SAT shortcut, force UNSAT
+                # seeds through shrink.
+                if self.adaptive and (not seed_is_sat):
+                    known_max = False
+                # Important: do not pre-block non-minimal UNSAT seeds before shrink.
+                # MUSer shrink/certification calls map.check_seed() and will reject
+                # a seed that has just been block_up()'ed by feedback.
+                if seed_is_sat or known_max:
+                    self._learn_feedback(seed_is_sat, seed, known_max)
 
             if self.config['verbose']:
                 print("- Seed is %s." % {True: "SAT", False: "UNSAT"}[seed_is_sat])
@@ -480,6 +533,7 @@ class MarcoPolo(object):
                 if known_max:
                     MSS = seed
                 else:
+                    seed = self._assist_sat_seed(seed)
                     with self.stats.time('grow'):
                         oldlen = len(seed)
                         MSS = self.subs.grow(seed)
