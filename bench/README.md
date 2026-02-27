@@ -30,7 +30,7 @@ The generator writes `.cnf.bz2` directly so it is compatible with the MARCO benc
 ```bash
 cd /path/to/MARCO
 
-uv run python bench/generate_symmetrymus_aaai25.py \
+uv run --isolated --with "python-sat[pblib,aiger]" python bench/generate_symmetrymus_aaai25.py \
   --output-root "$PWD/SymmetryMUS-AAAI25-Benchmarks" \
   --manifest-output "$PWD/bench/symmetrymus_aaai25_manifest.tsv" \
   --bin-opt-timeout-s 20
@@ -55,6 +55,7 @@ Notes:
 
 - The bin-packing default range is `5..24` (not `5..25`) to match the reported total of `60` bin-packing instances.
 - Add `--verify-unsat` to `generate_symmetrymus_aaai25.py` if you want SAT-check validation during generation.
+- If you see `portalocker ... Bad file descriptor` at import time, you are likely loading the wrong `pysat` package. Use the isolated `uv` command above.
 
 ## Profiling MARCO+ Bottlenecks
 

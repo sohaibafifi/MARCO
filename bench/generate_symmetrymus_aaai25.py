@@ -22,9 +22,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-from pysat.card import CardEnc, EncType
-from pysat.pb import PBEnc
-from pysat.solvers import Solver
+try:
+    from pysat.card import CardEnc, EncType
+    from pysat.pb import PBEnc
+    from pysat.solvers import Solver
+except Exception as exc:
+    raise RuntimeError(
+        "Failed to import python-sat modules (pysat.card/pysat.pb/pysat.solvers).\n"
+        "This usually means the unrelated 'pysat' package is installed in the active env.\n"
+        "Use an isolated uv run with python-sat, e.g.:\n"
+        "  uv run --isolated --with 'python-sat[pblib,aiger]' "
+        "python bench/generate_symmetrymus_aaai25.py ...\n"
+        "Or fix env packages:\n"
+        "  pip uninstall -y pysat\n"
+        "  pip install 'python-sat[pblib,aiger]'"
+    ) from exc
 
 try:
     from ortools.sat.python import cp_model
