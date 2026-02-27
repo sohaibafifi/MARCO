@@ -127,7 +127,7 @@ Extended row format (optional):
 ## 3) Submit Array Jobs
 
 ```bash
-chmod +x bench/run_array_task.sh bench/submit_slurm.sh bench/submit_oar.sh
+chmod +x bench/run_array_task.sh bench/run_array_group_task.sh bench/submit_slurm.sh bench/submit_oar.sh
 N=$(wc -l < bench/array_params.tsv)
 ```
 
@@ -181,6 +181,26 @@ TIMEOUT_S=3600 \
 bench/submit_oar.sh
 ```
 
+### OAR Grouped Mode (Recommended for Large Arrays)
+
+Avoid submitting one OAR job per TSV row by batching rows into chunks and running each chunk with local parallel workers.
+
+```bash
+PARAMS_FILE=bench/array_params.tsv \
+RESULTS_DIR="$PWD/bench/results" \
+TIMEOUT_S=3600 \
+GROUP_SIZE=20 \
+GROUP_PARALLEL=4 \
+CORES=4 \
+bench/submit_oar.sh
+```
+
+Behavior:
+
+- `GROUP_SIZE`: number of TSV rows handled by one OAR array job
+- `GROUP_PARALLEL`: max concurrent row workers inside each array job (uses GNU `parallel` when available, otherwise built-in fallback workers)
+- OAR array size becomes `ceil(total_rows / GROUP_SIZE)` instead of `total_rows`
+
 ## 4) Collect Results
 
 ```bash
@@ -221,6 +241,8 @@ python3 bench/collect_results.py \
 - `RUN_VERBOSE` (`0`/`1`)
 - `RUN_PROFILE_STATS` (`0`/`1`, enable `--profile-stats` and export phase timings)
 - `UV_BIN` or `PYTHON_BIN`
+- `GROUP_SIZE` (default `1` in `submit_oar.sh`; set `>1` to enable grouped OAR submission)
+- `GROUP_PARALLEL` (default `CORES`; worker concurrency per grouped OAR job)
 
 If `FORCE_MINISAT=0`, MARCO needs a working MUSer2 binary.
 Set `MUSER_BIN=/absolute/path/to/muser-2` (preferred) or `MUSER2_PATH=...`.

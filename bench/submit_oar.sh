@@ -27,11 +27,15 @@ CORES="${CORES:-1}"
 WALLTIME="${WALLTIME:-2:00:00}"
 JOB_NAME="${JOB_NAME:-marco-paper-sat11}"
 USE_LOOP="${USE_LOOP:-0}"
+GROUP_SIZE="${GROUP_SIZE:-1}"
+GROUP_PARALLEL="${GROUP_PARALLEL:-$CORES}"
 
 echo "Submitting OAR jobs"
 echo "  params-file   : $PARAMS_FILE"
 echo "  total rows    : $N_ROWS"
 echo "  resources     : core=$CORES walltime=$WALLTIME"
+echo "  group-size    : $GROUP_SIZE"
+echo "  group-parallel: $GROUP_PARALLEL"
 
 COMMON_ENV="MARCO_ROOT=$MARCO_ROOT REPO_ROOT=$REPO_ROOT RESULTS_DIR=$RESULTS_DIR"
 for v in \
@@ -39,13 +43,25 @@ for v in \
   THREADS MUSER_BIN FORCE_MINISAT NO_FEEDBACK \
   CORE_HANDOFF CORE_BASE_RATIO CORE_BACKOFF_CAP CORE_NO_CERTIFY \
   PORTFOLIO_SMART_AFTER_MUS PORTFOLIO_SMART_AFTER_OUTPUTS \
+  SAT_MAP_ASSIST_MIN_GAP HYBRID_SHRINK_HANDOFF_SIZE HYBRID_SHRINK_HANDOFF_FLOOR HYBRID_SHRINK_STAGNATION \
+  DUALHS_SOLVER DUALHS_MAP_MASTER DUALHS_MUS_QUOTA_EVERY \
   UV_BIN PYTHON_BIN; do
   if [[ -n "${!v:-}" ]]; then
     COMMON_ENV="$COMMON_ENV $v=${!v}"
   fi
 done
 
-if [[ "$USE_LOOP" == "1" ]]; then
+if [[ "$GROUP_SIZE" -gt 1 ]]; then
+  N_GROUPS=$(( (N_ROWS + GROUP_SIZE - 1) / GROUP_SIZE ))
+  echo "Using grouped submission mode"
+  echo "  group jobs    : $N_GROUPS"
+  oarsub \
+    -n "$JOB_NAME" \
+    --array "${N_GROUPS}" \
+    -l "/nodes=1/core=${CORES},walltime=${WALLTIME}" \
+    "export $COMMON_ENV PARAMS_FILE=$PARAMS_FILE GROUP_SIZE=$GROUP_SIZE GROUP_PARALLEL=$GROUP_PARALLEL; bash $SCRIPT_DIR/run_array_group_task.sh" \
+    "$@"
+elif [[ "$USE_LOOP" == "1" ]]; then
   echo "Using loop submission mode (params file + task index)"
   for i in $(seq 1 "${N_ROWS}"); do
     oarsub \
