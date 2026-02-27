@@ -24,8 +24,11 @@ DATASET_ROOT="${DATASET_ROOT:-}"
 if [[ -z "$DATASET_ROOT" ]]; then
   for cand in \
     "$MARCO_ROOT/SAT11-Competition-MUS-SelectedBenchmarks" \
+    "$MARCO_ROOT/SymmetryMUS-AAAI25-Benchmarks" \
     "$MARCO_ROOT/../SAT11-Competition-MUS-SelectedBenchmarks" \
+    "$MARCO_ROOT/../SymmetryMUS-AAAI25-Benchmarks" \
     "$PWD/SAT11-Competition-MUS-SelectedBenchmarks" \
+    "$PWD/SymmetryMUS-AAAI25-Benchmarks" \
     "$PWD/benchmarks/SAT11-Competition-MUS-SelectedBenchmarks"; do
     if [[ -d "$cand" ]]; then
       DATASET_ROOT="$cand"
@@ -34,6 +37,11 @@ if [[ -z "$DATASET_ROOT" ]]; then
   done
 fi
 DATASET_ROOT="${DATASET_ROOT:-$MARCO_ROOT/SAT11-Competition-MUS-SelectedBenchmarks}"
+if [[ ! -d "$DATASET_ROOT" ]]; then
+  echo "Dataset root not found: $DATASET_ROOT"
+  echo "Set DATASET_ROOT to your benchmark folder (e.g. .../SAT11-Competition-MUS-SelectedBenchmarks or .../SymmetryMUS-AAAI25-Benchmarks)."
+  exit 1
+fi
 RESULTS_DIR="${RESULTS_DIR:-$SCRIPT_DIR/results}"
 
 TIMEOUT_S="${TIMEOUT_S:-3600}"

@@ -189,6 +189,7 @@ Avoid submitting one OAR job per TSV row by batching rows into chunks and runnin
 ```bash
 PARAMS_FILE=bench/array_params.tsv \
 RESULTS_DIR="$PWD/bench/results" \
+DATASET_ROOT="$PWD/SymmetryMUS-AAAI25-Benchmarks" \
 TIMEOUT_S=3600 \
 GROUP_SIZE=20 \
 GROUP_PARALLEL=4 \
@@ -201,6 +202,7 @@ Behavior:
 - `GROUP_SIZE`: number of TSV rows handled by one OAR array job
 - `GROUP_PARALLEL`: max concurrent row workers inside each array job (uses GNU `parallel` when available, otherwise built-in fallback workers)
 - OAR array size becomes `ceil(total_rows / GROUP_SIZE)` instead of `total_rows`
+- Set `DATASET_ROOT` explicitly when rows come from non-default datasets (for example `SymmetryMUS-AAAI25-Benchmarks`).
 
 ## 4) Collect Results
 
